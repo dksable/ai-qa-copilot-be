@@ -8,7 +8,7 @@ import { generateTestPlanWithGroq } from "./groq.js";
 
 const app = express();
 const port = Number(process.env.PORT ?? 4000);
-const allowedOrigins = (process.env.CORS_ORIGIN ?? "http://localhost:5173")
+const allowedOrigins = (process.env.CORS_ORIGIN ?? "*")
   .split(",")
   .map((origin) => origin.trim())
   .filter(Boolean);
@@ -22,7 +22,12 @@ const GenerateRequestSchema = z.object({
 app.use(
   cors({
     origin(origin, callback) {
-      if (!origin || allowedOrigins.includes(origin) || localhostDevOrigin.test(origin)) {
+      if (
+        allowedOrigins.includes("*") ||
+        !origin ||
+        allowedOrigins.includes(origin) ||
+        localhostDevOrigin.test(origin)
+      ) {
         callback(null, true);
         return;
       }
@@ -30,7 +35,16 @@ app.use(
     },
   }),
 );
+app.options("*", cors());
 app.use(express.json({ limit: "1mb" }));
+
+app.get("/", (_request, response) => {
+  response.json({
+    ok: true,
+    service: "ai-qa-copilot-backend",
+    routes: ["/health", "/api/generate-testcases"],
+  });
+});
 
 app.get("/health", (_request, response) => {
   response.json({ ok: true, service: "ai-qa-copilot-backend" });
