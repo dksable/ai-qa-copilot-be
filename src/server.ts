@@ -5,6 +5,10 @@ import express from "express";
 import { z } from "zod";
 
 import { generateTestPlanWithGroq } from "./groq.js";
+import { aiChatRouter } from "./aiChatRoutes.js";
+import { exportRouter } from "./exportRoutes.js";
+import { projectRouter } from "./projectRoutes.js";
+import { saveGenerationHistory } from "./projectStore.js";
 
 const app = express();
 const port = Number(process.env.PORT ?? 4000);
@@ -17,6 +21,9 @@ const localhostDevOrigin = /^https?:\/\/(localhost|127\.0\.0\.1):\d+$/;
 const GenerateRequestSchema = z.object({
   requirement: z.string().trim().min(10).max(8000),
   testType: z.enum(["functional", "api", "ui", "integration"]).default("functional"),
+  projectId: z.string().optional(),
+  moduleId: z.string().optional(),
+  requirementId: z.string().optional(),
 });
 
 app.use(
@@ -50,10 +57,31 @@ app.get("/health", (_request, response) => {
   response.json({ ok: true, service: "ai-qa-copilot-backend" });
 });
 
+app.use("/api", projectRouter);
+app.use("/api", exportRouter);
+app.use("/api", aiChatRouter);
+
 app.post("/api/generate-testcases", async (request, response) => {
   try {
     const input = GenerateRequestSchema.parse(request.body);
-    const testPlan = await generateTestPlanWithGroq(input);
+    const testPlan = await generateTestPlanWithGroq({
+      requirement: input.requirement,
+      testType: input.testType,
+    });
+
+    if (input.projectId && input.moduleId) {
+      const saved = await saveGenerationHistory({
+        projectId: input.projectId,
+        moduleId: input.moduleId,
+        requirementId: input.requirementId,
+        requirementText: input.requirement,
+        testType: input.testType,
+        output: testPlan,
+      });
+      response.json({ ...testPlan, savedRequirementId: saved?.requirement.id, savedHistoryId: saved?.history.id });
+      return;
+    }
+
     response.json(testPlan);
   } catch (error) {
     if (error instanceof z.ZodError) {
@@ -69,6 +97,21 @@ app.post("/api/generate-testcases", async (request, response) => {
       message: error instanceof Error ? error.message : "Unexpected backend error.",
     });
   }
+});
+
+app.use((error: unknown, _request: express.Request, response: express.Response, next: express.NextFunction) => {
+  if (response.headersSent) {
+    next(error);
+    return;
+  }
+  if (error instanceof z.ZodError) {
+    response.status(400).json({ message: "Invalid request payload.", issues: error.issues });
+    return;
+  }
+  console.error(error);
+  response.status(500).json({
+    message: error instanceof Error ? error.message : "Unexpected backend error.",
+  });
 });
 
 app.use((_request, response) => {
