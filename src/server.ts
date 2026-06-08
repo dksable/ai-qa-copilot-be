@@ -7,7 +7,9 @@ import { z } from "zod";
 import { generateTestPlanWithGroq } from "./groq.js";
 import { aiChatRouter } from "./aiChatRoutes.js";
 import { analyticsRouter } from "./analyticsRoutes.js";
+import { authRouter } from "./authRoutes.js";
 import { exportRouter } from "./exportRoutes.js";
+import { requireAuth } from "./permissionMiddleware.js";
 import { projectRouter } from "./projectRoutes.js";
 import { reviewRouter } from "./reviewRoutes.js";
 import { workspaceRouter } from "./workspaceRoutes.js";
@@ -60,6 +62,8 @@ app.get("/health", (_request, response) => {
   response.json({ ok: true, service: "ai-qa-copilot-backend" });
 });
 
+app.use("/api", authRouter);
+app.use("/api", requireAuth);
 app.use("/api", projectRouter);
 app.use("/api", analyticsRouter);
 app.use("/api", exportRouter);

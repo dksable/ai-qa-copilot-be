@@ -26,9 +26,21 @@ export type ReviewAction =
 
 export interface User {
   id: string;
+  fullName: string;
   name: string;
   email: string;
+  passwordHash?: string;
+  googleId?: string;
+  avatar?: string;
+  authProvider: "email" | "google";
+  role: WorkspaceRole;
+  status: "Active" | "Inactive" | "Suspended";
+  emailVerified: boolean;
+  lastLoginAt?: string;
+  resetToken?: string;
+  resetTokenExpiresAt?: string;
   createdAt: string;
+  updatedAt: string;
 }
 
 export interface Workspace {

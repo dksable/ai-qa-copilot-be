@@ -1,6 +1,8 @@
 import { mkdir, readFile, writeFile } from "node:fs/promises";
+import { randomBytes, scrypt as scryptCallback, timingSafeEqual } from "node:crypto";
 import path from "node:path";
 import { fileURLToPath } from "node:url";
+import { promisify } from "node:util";
 
 import type { TestFocus, TestPlan } from "./types.js";
 import type {
@@ -42,6 +44,10 @@ const dbFile = path.join(dataDir, "db.json");
 const defaultUserId = "demo-user";
 const defaultWorkspaceId = "workspace_default";
 const demoTimestamp = "2026-06-08T09:00:00.000Z";
+const demoEmail = "demo@aiqacopilot.local";
+const demoPasswordHash =
+  "scrypt:demo-aiqa-salt-2026:5db2a0d89de2b4fc506a01ca83b2b01c92a884833ff230d54f8fcb6341b0584a1aa705d10c1e90bf6ff968174cf3ae9c956c75c786a1ed6c08b81dadadfb1856";
+const scrypt = promisify(scryptCallback);
 const demoTestPlan: TestPlan = {
   summary: "Password reset coverage for email link expiry, secure password policy, and confirmation messaging.",
   acceptanceCriteria: [
@@ -165,9 +171,16 @@ const initialDb: ProjectDatabase = {
   users: [
     {
       id: defaultUserId,
+      fullName: "Demo User",
       name: "Demo User",
-      email: "demo@aiqacopilot.local",
+      email: demoEmail,
+      passwordHash: demoPasswordHash,
+      authProvider: "email",
+      role: "Owner",
+      status: "Active",
+      emailVerified: true,
       createdAt: new Date().toISOString(),
+      updatedAt: new Date().toISOString(),
     },
   ],
   projects: [
@@ -318,6 +331,7 @@ async function readDb(): Promise<ProjectDatabase> {
     aiChats: (db.aiChats ?? []).map(normalizeChat),
     reviewComments: db.reviewComments ?? [],
     reviewAuditTrail: db.reviewAuditTrail ?? [],
+    users: (db.users ?? initialDb.users).map(normalizeUser),
     projects: (db.projects ?? []).map(normalizeProject),
     modules: (db.modules ?? []).map(normalizeModule),
     requirements: (db.requirements ?? []).map(normalizeRequirement),
@@ -364,6 +378,23 @@ function normalizeChat(chat: AIChat): AIChat {
   return { ...chat, workspaceId: chat.workspaceId ?? defaultWorkspaceId };
 }
 
+function normalizeUser(user: ProjectDatabase["users"][number]): ProjectDatabase["users"][number] {
+  const timestamp = user.createdAt ?? now();
+  const isDemoUser = user.id === defaultUserId || user.email?.toLowerCase() === demoEmail;
+  return {
+    ...user,
+    fullName: user.fullName ?? user.name ?? "Current User",
+    name: user.name ?? user.fullName ?? "Current User",
+    passwordHash: user.passwordHash ?? (isDemoUser ? demoPasswordHash : undefined),
+    authProvider: user.authProvider ?? "email",
+    role: user.role ?? "Owner",
+    status: user.status ?? "Active",
+    emailVerified: user.emailVerified ?? true,
+    createdAt: timestamp,
+    updatedAt: user.updatedAt ?? timestamp,
+  };
+}
+
 function enrichHistory(db: ProjectDatabase, history: TestCaseGenerationHistory): TestCaseHistoryRecord {
   const normalized = normalizeHistory(history);
   const project = db.projects.find((item) => item.id === normalized.projectId);
@@ -401,6 +432,8 @@ function addActivityLog(
     action: string;
     resourceType: string;
     resourceId?: string;
+    actorId?: string;
+    actorName?: string;
     oldValue?: unknown;
     newValue?: unknown;
   },
@@ -409,8 +442,8 @@ function addActivityLog(
   const log: ActivityLog = {
     id: createId("activity"),
     workspaceId: input.workspaceId ?? defaultWorkspaceId,
-    actorId: user.userId,
-    actorName: user.userName,
+    actorId: input.actorId ?? user.userId,
+    actorName: input.actorName ?? user.userName,
     action: input.action,
     resourceType: input.resourceType,
     resourceId: input.resourceId,
@@ -1650,6 +1683,236 @@ export async function listWorkspaces() {
   return db.workspaces.sort((a, b) => b.updatedAt.localeCompare(a.updatedAt));
 }
 
+async function hashPassword(password: string) {
+  const salt = randomBytes(16).toString("hex");
+  const derived = (await scrypt(password, salt, 64)) as Buffer;
+  return `scrypt:${salt}:${derived.toString("hex")}`;
+}
+
+async function verifyPassword(password: string, storedHash?: string) {
+  if (!storedHash) return false;
+  const [algorithm, salt, hash] = storedHash.split(":");
+  if (algorithm !== "scrypt" || !salt || !hash) return false;
+  const derived = (await scrypt(password, salt, 64)) as Buffer;
+  const original = Buffer.from(hash, "hex");
+  return original.length === derived.length && timingSafeEqual(original, derived);
+}
+
+function safeUser(user: ProjectDatabase["users"][number]) {
+  const { passwordHash, resetToken, resetTokenExpiresAt, ...rest } = user;
+  void passwordHash;
+  void resetToken;
+  void resetTokenExpiresAt;
+  return rest;
+}
+
+function defaultWorkspaceName(fullName: string, workspaceName?: string) {
+  return workspaceName?.trim() || `${fullName.split(" ")[0] || "User"}'s Workspace`;
+}
+
+function authContext(db: ProjectDatabase, userId: string) {
+  const user = db.users.find((item) => item.id === userId);
+  if (!user || user.status !== "Active") return null;
+  const member = db.workspaceMembers.find((item) => item.userId === userId && item.status === "Active");
+  const workspace = member ? db.workspaces.find((item) => item.id === member.workspaceId) : undefined;
+  return {
+    user: safeUser(user),
+    workspace: workspace ?? null,
+    member: member ?? null,
+    role: member?.role ?? user.role,
+    permissions: permissionsForRole(member?.role ?? user.role),
+  };
+}
+
+export async function getAuthContext(userId: string) {
+  const db = await readDb();
+  return authContext(db, userId);
+}
+
+export async function signupUser(input: {
+  fullName: string;
+  email: string;
+  password: string;
+  workspaceName?: string;
+}) {
+  const db = await readDb();
+  const email = input.email.trim().toLowerCase();
+  if (db.users.some((user) => user.email.toLowerCase() === email)) {
+    throw new Error("An account already exists for this email.");
+  }
+  const timestamp = now();
+  const user = {
+    id: createId("user"),
+    fullName: input.fullName.trim(),
+    name: input.fullName.trim(),
+    email,
+    passwordHash: await hashPassword(input.password),
+    authProvider: "email" as const,
+    role: "Owner" as const,
+    status: "Active" as const,
+    emailVerified: false,
+    createdAt: timestamp,
+    updatedAt: timestamp,
+  };
+  const workspace: Workspace = {
+    id: createId("workspace"),
+    workspaceName: defaultWorkspaceName(user.fullName, input.workspaceName),
+    description: "Default workspace created during signup.",
+    ownerId: user.id,
+    status: "Active",
+    createdAt: timestamp,
+    updatedAt: timestamp,
+  };
+  const member: WorkspaceMember = {
+    id: createId("member"),
+    workspaceId: workspace.id,
+    userId: user.id,
+    name: user.fullName,
+    email: user.email,
+    role: "Owner",
+    status: "Active",
+    assignedProjects: [],
+    joinedAt: timestamp,
+    lastActiveAt: timestamp,
+  };
+  db.users.push(user);
+  db.workspaces.push(workspace);
+  db.workspaceMembers.push(member);
+  addActivityLog(db, {
+    workspaceId: workspace.id,
+    actorId: user.id,
+    actorName: user.fullName,
+    action: "Workspace created",
+    resourceType: "Workspace",
+    resourceId: workspace.id,
+  });
+  await writeDb(db);
+  return authContext(db, user.id)!;
+}
+
+export async function loginUser(emailInput: string, password: string) {
+  const db = await readDb();
+  const email = emailInput.trim().toLowerCase();
+  const user = db.users.find((item) => item.email.toLowerCase() === email && item.authProvider === "email");
+  if (!user || user.status !== "Active" || !(await verifyPassword(password, user.passwordHash))) {
+    throw new Error("Invalid email or password.");
+  }
+  user.lastLoginAt = now();
+  user.updatedAt = user.lastLoginAt;
+  const member = db.workspaceMembers.find((item) => item.userId === user.id && item.status === "Active");
+  if (member) member.lastActiveAt = user.lastLoginAt;
+  await writeDb(db);
+  return authContext(db, user.id)!;
+}
+
+export async function googleLoginUser(input: { googleId?: string; email: string; fullName: string; avatar?: string }) {
+  const db = await readDb();
+  const email = input.email.trim().toLowerCase();
+  const timestamp = now();
+  let user = db.users.find((item) => item.email.toLowerCase() === email);
+  if (!user) {
+    user = {
+      id: createId("user"),
+      fullName: input.fullName,
+      name: input.fullName,
+      email,
+      googleId: input.googleId,
+      avatar: input.avatar,
+      authProvider: "google",
+      role: "Owner",
+      status: "Active",
+      emailVerified: true,
+      lastLoginAt: timestamp,
+      createdAt: timestamp,
+      updatedAt: timestamp,
+    };
+    const workspace: Workspace = {
+      id: createId("workspace"),
+      workspaceName: defaultWorkspaceName(user.fullName),
+      description: "Default workspace created from Google login.",
+      ownerId: user.id,
+      status: "Active",
+      createdAt: timestamp,
+      updatedAt: timestamp,
+    };
+    db.users.push(user);
+    db.workspaces.push(workspace);
+    db.workspaceMembers.push({
+      id: createId("member"),
+      workspaceId: workspace.id,
+      userId: user.id,
+      name: user.fullName,
+      email: user.email,
+      role: "Owner",
+      status: "Active",
+      assignedProjects: [],
+      joinedAt: timestamp,
+      lastActiveAt: timestamp,
+    });
+  } else {
+    user.googleId = input.googleId ?? user.googleId;
+    user.avatar = input.avatar ?? user.avatar;
+    user.lastLoginAt = timestamp;
+    user.updatedAt = timestamp;
+  }
+  await writeDb(db);
+  return authContext(db, user.id)!;
+}
+
+export async function updateUserProfile(userId: string, input: { fullName?: string; avatar?: string }) {
+  const db = await readDb();
+  const user = db.users.find((item) => item.id === userId);
+  if (!user) return null;
+  if (input.fullName) {
+    user.fullName = input.fullName;
+    user.name = input.fullName;
+  }
+  if (input.avatar !== undefined) user.avatar = input.avatar;
+  user.updatedAt = now();
+  db.workspaceMembers
+    .filter((member) => member.userId === userId)
+    .forEach((member) => {
+      member.name = user.fullName;
+    });
+  await writeDb(db);
+  return authContext(db, userId);
+}
+
+export async function changeUserPassword(userId: string, currentPassword: string, newPassword: string) {
+  const db = await readDb();
+  const user = db.users.find((item) => item.id === userId);
+  if (!user || user.authProvider !== "email") throw new Error("Password changes are only available for email accounts.");
+  if (!(await verifyPassword(currentPassword, user.passwordHash))) throw new Error("Current password is incorrect.");
+  user.passwordHash = await hashPassword(newPassword);
+  user.updatedAt = now();
+  await writeDb(db);
+  return true;
+}
+
+export async function createPasswordReset(emailInput: string) {
+  const db = await readDb();
+  const email = emailInput.trim().toLowerCase();
+  const user = db.users.find((item) => item.email.toLowerCase() === email && item.authProvider === "email");
+  if (!user) return null;
+  user.resetToken = randomBytes(24).toString("hex");
+  user.resetTokenExpiresAt = new Date(Date.now() + 30 * 60_000).toISOString();
+  user.updatedAt = now();
+  await writeDb(db);
+  return { resetToken: user.resetToken, resetLink: `/reset-password?token=${user.resetToken}` };
+}
+
+export async function resetUserPassword(token: string, password: string) {
+  const db = await readDb();
+  const user = db.users.find((item) => item.resetToken === token && item.resetTokenExpiresAt && item.resetTokenExpiresAt > now());
+  if (!user) throw new Error("Reset link is invalid or expired.");
+  user.passwordHash = await hashPassword(password);
+  user.resetToken = undefined;
+  user.resetTokenExpiresAt = undefined;
+  user.updatedAt = now();
+  await writeDb(db);
+  return true;
+}
+
 export async function getWorkspace(workspaceId: string) {
   const db = await readDb();
   const workspace = db.workspaces.find((item) => item.id === workspaceId);
@@ -1918,10 +2181,10 @@ export async function getWorkspacePermissions(workspaceId: string) {
   };
 }
 
-export async function getCurrentWorkspaceMember(workspaceId: string) {
+export async function getCurrentWorkspaceMember(workspaceId: string, userId = defaultUserId) {
   const db = await readDb();
   return db.workspaceMembers.find(
-    (member) => member.workspaceId === workspaceId && member.userId === defaultUserId && member.status === "Active",
+    (member) => member.workspaceId === workspaceId && member.userId === userId && member.status === "Active",
   ) ?? null;
 }
 
