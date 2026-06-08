@@ -9,6 +9,7 @@ import type {
   AIChat,
   AIChatSummary,
   ActivityLog,
+  BillingCycle,
   DashboardStats,
   EntityStatus,
   ExportFormat,
@@ -18,6 +19,8 @@ import type {
   InviteStatus,
   MemberStatus,
   ModulePriority,
+  Plan,
+  PlanId,
   ProjectPermissionLevel,
   Project,
   ProjectDatabase,
@@ -27,6 +30,7 @@ import type {
   Requirement,
   ReviewAction,
   ReviewComment,
+  Subscription,
   TestCaseGenerationHistory,
   TestCaseHistoryCompare,
   TestCaseHistoryRecord,
@@ -48,6 +52,76 @@ const demoEmail = "demo@aiqacopilot.local";
 const demoPasswordHash =
   "scrypt:demo-aiqa-salt-2026:5db2a0d89de2b4fc506a01ca83b2b01c92a884833ff230d54f8fcb6341b0584a1aa705d10c1e90bf6ff968174cf3ae9c956c75c786a1ed6c08b81dadadfb1856";
 const scrypt = promisify(scryptCallback);
+const planCatalog: Plan[] = [
+  {
+    id: "free",
+    name: "Free",
+    description: "Start testing AI QA workflows with a small team.",
+    monthlyPrice: 0,
+    yearlyPrice: 0,
+    trialDays: 14,
+    features: ["1 Workspace", "2 Team Members", "2 Projects", "PDF Export", "14-Day Trial"],
+    limits: {
+      workspaces: 1,
+      teamMembers: 2,
+      projects: 2,
+      requirementsPerMonth: 20,
+      aiGenerationsPerMonth: 50,
+      aiChatMessagesPerMonth: 50,
+      exports: "PDF only",
+      analytics: false,
+      reviewWorkflow: false,
+      jiraIntegration: false,
+      prioritySupport: false,
+      customLimits: false,
+    },
+  },
+  {
+    id: "pro",
+    name: "Pro",
+    description: "Scale AI test design and governed QA workflows.",
+    monthlyPrice: 49,
+    yearlyPrice: 470,
+    recommended: true,
+    features: ["10 Team Members", "Unlimited Projects", "1000 AI Generations", "Excel + PDF Export", "Analytics Dashboard", "Review Workflow"],
+    limits: {
+      workspaces: 1,
+      teamMembers: 10,
+      projects: "unlimited",
+      requirementsPerMonth: "unlimited",
+      aiGenerationsPerMonth: 1000,
+      aiChatMessagesPerMonth: 2000,
+      exports: "Excel + PDF",
+      analytics: true,
+      reviewWorkflow: true,
+      jiraIntegration: false,
+      prioritySupport: false,
+      customLimits: false,
+    },
+  },
+  {
+    id: "enterprise",
+    name: "Enterprise",
+    description: "Custom limits, advanced analytics, integrations, and support.",
+    monthlyPrice: null,
+    yearlyPrice: null,
+    features: ["Unlimited Workspaces", "Unlimited Team Members", "Unlimited AI Usage", "Jira Integration", "Advanced Analytics", "Priority Support", "Custom Limits"],
+    limits: {
+      workspaces: "unlimited",
+      teamMembers: "unlimited",
+      projects: "unlimited",
+      requirementsPerMonth: "unlimited",
+      aiGenerationsPerMonth: "unlimited",
+      aiChatMessagesPerMonth: "unlimited",
+      exports: "Excel + PDF",
+      analytics: true,
+      reviewWorkflow: true,
+      jiraIntegration: true,
+      prioritySupport: true,
+      customLimits: true,
+    },
+  },
+];
 const demoTestPlan: TestPlan = {
   summary: "Password reset coverage for email link expiry, secure password policy, and confirmation messaging.",
   acceptanceCriteria: [
@@ -140,6 +214,21 @@ const demoTestPlan: TestPlan = {
 };
 
 const initialDb: ProjectDatabase = {
+  plans: planCatalog,
+  subscriptions: [
+    {
+      id: "subscription_default",
+      workspaceId: defaultWorkspaceId,
+      planId: "pro",
+      billingCycle: "monthly",
+      status: "Trialing",
+      trialEndsAt: new Date(Date.now() + 14 * 86_400_000).toISOString(),
+      currentPeriodStart: new Date().toISOString(),
+      currentPeriodEnd: new Date(Date.now() + 30 * 86_400_000).toISOString(),
+      createdAt: new Date().toISOString(),
+      updatedAt: new Date().toISOString(),
+    },
+  ],
   workspaces: [
     {
       id: defaultWorkspaceId,
@@ -322,6 +411,8 @@ async function readDb(): Promise<ProjectDatabase> {
   const workspaceMembers = db.workspaceMembers?.length ? db.workspaceMembers : initialDb.workspaceMembers;
   return {
     ...db,
+    plans: db.plans?.length ? db.plans : planCatalog,
+    subscriptions: db.subscriptions?.length ? db.subscriptions : initialDb.subscriptions,
     workspaces,
     workspaceMembers,
     workspaceInvites: db.workspaceInvites ?? [],
@@ -1681,6 +1772,68 @@ export async function getHistoryReviewComments(historyId: string) {
 export async function listWorkspaces() {
   const db = await readDb();
   return db.workspaces.sort((a, b) => b.updatedAt.localeCompare(a.updatedAt));
+}
+
+function ensureWorkspaceSubscription(db: ProjectDatabase, workspaceId: string) {
+  let subscription = db.subscriptions.find((item) => item.workspaceId === workspaceId);
+  if (!subscription) {
+    const timestamp = now();
+    subscription = {
+      id: createId("subscription"),
+      workspaceId,
+      planId: "free",
+      billingCycle: "monthly",
+      status: "Trialing",
+      trialEndsAt: new Date(Date.now() + 14 * 86_400_000).toISOString(),
+      currentPeriodStart: timestamp,
+      currentPeriodEnd: new Date(Date.now() + 30 * 86_400_000).toISOString(),
+      createdAt: timestamp,
+      updatedAt: timestamp,
+    };
+    db.subscriptions.push(subscription);
+  }
+  return subscription;
+}
+
+export async function listPlans() {
+  const db = await readDb();
+  return db.plans?.length ? db.plans : planCatalog;
+}
+
+export async function getWorkspaceSubscription(workspaceId: string) {
+  const db = await readDb();
+  const subscription = ensureWorkspaceSubscription(db, workspaceId);
+  const plan = (db.plans?.length ? db.plans : planCatalog).find((item) => item.id === subscription.planId) ?? planCatalog[0];
+  await writeDb(db);
+  return { subscription, plan };
+}
+
+export async function updateWorkspaceSubscription(
+  workspaceId: string,
+  input: { planId: PlanId; billingCycle?: BillingCycle },
+) {
+  const db = await readDb();
+  const plan = (db.plans?.length ? db.plans : planCatalog).find((item) => item.id === input.planId);
+  if (!plan) return null;
+  const subscription = ensureWorkspaceSubscription(db, workspaceId);
+  const oldValue = { ...subscription };
+  subscription.planId = input.planId;
+  subscription.billingCycle = input.billingCycle ?? subscription.billingCycle;
+  subscription.status = input.planId === "free" ? "Trialing" : "Active";
+  subscription.trialEndsAt = input.planId === "free" ? subscription.trialEndsAt ?? new Date(Date.now() + 14 * 86_400_000).toISOString() : undefined;
+  subscription.currentPeriodStart = now();
+  subscription.currentPeriodEnd = new Date(Date.now() + (subscription.billingCycle === "yearly" ? 365 : 30) * 86_400_000).toISOString();
+  subscription.updatedAt = now();
+  addActivityLog(db, {
+    workspaceId,
+    action: "Subscription plan changed",
+    resourceType: "Subscription",
+    resourceId: subscription.id,
+    oldValue,
+    newValue: subscription,
+  });
+  await writeDb(db);
+  return { subscription, plan };
 }
 
 async function hashPassword(password: string) {

@@ -10,6 +10,7 @@ import { analyticsRouter } from "./analyticsRoutes.js";
 import { authRouter } from "./authRoutes.js";
 import { exportRouter } from "./exportRoutes.js";
 import { requireAuth } from "./permissionMiddleware.js";
+import { pricingRouter } from "./pricingRoutes.js";
 import { projectRouter } from "./projectRoutes.js";
 import { reviewRouter } from "./reviewRoutes.js";
 import { workspaceRouter } from "./workspaceRoutes.js";
@@ -65,6 +66,7 @@ app.get("/health", (_request, response) => {
 app.use("/api", authRouter);
 app.use("/api", requireAuth);
 app.use("/api", projectRouter);
+app.use("/api", pricingRouter);
 app.use("/api", analyticsRouter);
 app.use("/api", exportRouter);
 app.use("/api", aiChatRouter);
