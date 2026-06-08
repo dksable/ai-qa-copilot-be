@@ -12,7 +12,13 @@ import type { ExportType, TestCaseHistoryRecord } from "./projectTypes.js";
 
 const router = Router();
 
-const HistoryStatusSchema = z.enum(["Draft", "Reviewed", "Approved"]);
+const HistoryStatusSchema = z.enum([
+  "Draft",
+  "Submitted for Review",
+  "Changes Requested",
+  "Approved",
+  "Rejected",
+]);
 const ExportFormatSchema = z.enum(["excel", "pdf"]).default("excel");
 
 const ExportFiltersSchema = z.object({
@@ -84,6 +90,17 @@ async function sendExport({
 }) {
   if (!records.length) {
     response.status(404).json({ message: "No history records found for export." });
+    return;
+  }
+  const blockedRecord = records.find((record) =>
+    ["Rejected", "Changes Requested"].includes(record.reviewStatus),
+  );
+  if (blockedRecord) {
+    response.status(403).json({
+      message: "This test case version must be approved before final export.",
+      historyId: blockedRecord.id,
+      reviewStatus: blockedRecord.reviewStatus,
+    });
     return;
   }
 

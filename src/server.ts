@@ -6,8 +6,11 @@ import { z } from "zod";
 
 import { generateTestPlanWithGroq } from "./groq.js";
 import { aiChatRouter } from "./aiChatRoutes.js";
+import { analyticsRouter } from "./analyticsRoutes.js";
 import { exportRouter } from "./exportRoutes.js";
 import { projectRouter } from "./projectRoutes.js";
+import { reviewRouter } from "./reviewRoutes.js";
+import { workspaceRouter } from "./workspaceRoutes.js";
 import { saveGenerationHistory } from "./projectStore.js";
 
 const app = express();
@@ -58,8 +61,11 @@ app.get("/health", (_request, response) => {
 });
 
 app.use("/api", projectRouter);
+app.use("/api", analyticsRouter);
 app.use("/api", exportRouter);
 app.use("/api", aiChatRouter);
+app.use("/api", reviewRouter);
+app.use("/api", workspaceRouter);
 
 app.post("/api/generate-testcases", async (request, response) => {
   try {

@@ -3,9 +3,26 @@ import type { Priority, TestFocus, TestPlan } from "./types.js";
 export type ProjectDomain = "Banking" | "Healthcare" | "E-commerce" | "SaaS" | "Education" | "Custom";
 export type EntityStatus = "Active" | "Archived";
 export type ModulePriority = Priority | "Critical";
-export type HistoryStatus = "Draft" | "Reviewed" | "Approved";
+export type HistoryStatus =
+  | "Draft"
+  | "Submitted for Review"
+  | "Changes Requested"
+  | "Approved"
+  | "Rejected";
 export type ExportFormat = "excel" | "pdf";
 export type ExportType = "version" | "versions" | "requirement" | "project" | "filtered";
+export type UserRole = "Admin" | "QA Lead" | "QA Engineer" | "Viewer";
+export type WorkspaceRole = "Owner" | "Admin" | "QA Lead" | "QA Engineer" | "Viewer";
+export type ProjectPermissionLevel = "Full Access" | "Edit Access" | "Review Access" | "View Only";
+export type MemberStatus = "Active" | "Inactive" | "Removed";
+export type InviteStatus = "Pending" | "Accepted" | "Expired" | "Revoked";
+export type ReviewAction =
+  | "Submitted for Review"
+  | "Approved"
+  | "Changes Requested"
+  | "Rejected"
+  | "Comment Added"
+  | "Exported Approved Version";
 
 export interface User {
   id: string;
@@ -14,8 +31,73 @@ export interface User {
   createdAt: string;
 }
 
+export interface Workspace {
+  id: string;
+  workspaceName: string;
+  description: string;
+  logo?: string;
+  ownerId: string;
+  status: EntityStatus;
+  createdAt: string;
+  updatedAt: string;
+}
+
+export interface WorkspaceMember {
+  id: string;
+  workspaceId: string;
+  userId: string;
+  name: string;
+  email: string;
+  role: WorkspaceRole;
+  status: MemberStatus;
+  assignedProjects: Array<{
+    projectId: string;
+    permission: ProjectPermissionLevel;
+  }>;
+  joinedAt: string;
+  lastActiveAt: string;
+}
+
+export interface WorkspaceInvite {
+  id: string;
+  workspaceId: string;
+  email: string;
+  role: WorkspaceRole;
+  assignedProjects: Array<{
+    projectId: string;
+    permission: ProjectPermissionLevel;
+  }>;
+  message?: string;
+  token: string;
+  status: InviteStatus;
+  invitedBy: string;
+  expiresAt: string;
+  createdAt: string;
+}
+
+export interface WorkspacePermission {
+  id: string;
+  workspaceId: string;
+  role: WorkspaceRole;
+  permissions: string[];
+}
+
+export interface ActivityLog {
+  id: string;
+  workspaceId: string;
+  actorId: string;
+  actorName: string;
+  action: string;
+  resourceType: string;
+  resourceId?: string;
+  oldValue?: unknown;
+  newValue?: unknown;
+  createdAt: string;
+}
+
 export interface Project {
   id: string;
+  workspaceId: string;
   userId: string;
   name: string;
   description: string;
@@ -27,6 +109,7 @@ export interface Project {
 
 export interface ProjectModule {
   id: string;
+  workspaceId: string;
   projectId: string;
   name: string;
   description: string;
@@ -38,6 +121,7 @@ export interface ProjectModule {
 
 export interface Requirement {
   id: string;
+  workspaceId: string;
   projectId: string;
   moduleId: string;
   title: string;
@@ -52,6 +136,7 @@ export interface Requirement {
 export interface TestCaseGenerationHistory {
   id: string;
   userId: string;
+  workspaceId: string;
   projectId: string;
   moduleId: string;
   requirementId: string;
@@ -63,6 +148,16 @@ export interface TestCaseGenerationHistory {
   testType: TestFocus;
   coverageScore: number;
   status: HistoryStatus;
+  reviewStatus: HistoryStatus;
+  submittedBy?: string;
+  submittedAt?: string;
+  reviewedBy?: string;
+  reviewedAt?: string;
+  approvedBy?: string;
+  approvedAt?: string;
+  rejectedBy?: string;
+  rejectedAt?: string;
+  isLocked: boolean;
   updatedAt: string;
   output: TestPlan;
 }
@@ -85,12 +180,37 @@ export interface TestCaseHistoryCompare {
 export interface ExportHistory {
   id: string;
   userId: string;
+  workspaceId: string;
   exportType: ExportType;
   exportFormat: ExportFormat;
   projectId?: string;
   requirementId?: string;
   totalRecords: number;
   createdAt: string;
+}
+
+export interface ReviewComment {
+  id: string;
+  historyId: string;
+  userId: string;
+  userName: string;
+  role: UserRole;
+  message: string;
+  actionType: ReviewAction;
+  createdAt: string;
+}
+
+export interface ReviewAuditTrail {
+  id: string;
+  historyId: string;
+  action: ReviewAction;
+  userId: string;
+  userName: string;
+  role: UserRole;
+  oldStatus?: HistoryStatus;
+  newStatus?: HistoryStatus;
+  timestamp: string;
+  comment?: string;
 }
 
 export interface AIChatMessage {
@@ -102,6 +222,7 @@ export interface AIChatMessage {
 export interface AIChat {
   id: string;
   userId: string;
+  workspaceId: string;
   projectId: string;
   moduleId: string;
   requirementId: string;
@@ -140,10 +261,20 @@ export interface DashboardStats {
   totalRequirements: number;
   totalTestCases: number;
   averageTestCoverageScore: number;
+  pendingReviews: number;
+  approvedTestCases: number;
+  changesRequested: number;
+  rejectedItems: number;
+  averageApprovalTimeHours: number;
   recentlyUpdatedProjects: ProjectSummary[];
 }
 
 export interface ProjectDatabase {
+  workspaces: Workspace[];
+  workspaceMembers: WorkspaceMember[];
+  workspaceInvites: WorkspaceInvite[];
+  workspacePermissions: WorkspacePermission[];
+  activityLogs: ActivityLog[];
   users: User[];
   projects: Project[];
   modules: ProjectModule[];
@@ -151,4 +282,6 @@ export interface ProjectDatabase {
   histories: TestCaseGenerationHistory[];
   exportHistories: ExportHistory[];
   aiChats: AIChat[];
+  reviewComments: ReviewComment[];
+  reviewAuditTrail: ReviewAuditTrail[];
 }

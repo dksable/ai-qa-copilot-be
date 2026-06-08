@@ -31,7 +31,13 @@ const router = Router();
 
 const DomainSchema = z.enum(["Banking", "Healthcare", "E-commerce", "SaaS", "Education", "Custom"]);
 const StatusSchema = z.enum(["Active", "Archived"]);
-const HistoryStatusSchema = z.enum(["Draft", "Reviewed", "Approved"]);
+const HistoryStatusSchema = z.enum([
+  "Draft",
+  "Submitted for Review",
+  "Changes Requested",
+  "Approved",
+  "Rejected",
+]);
 const PrioritySchema = z.enum(["Low", "Medium", "High", "Critical"]);
 const TestTypeSchema = z.enum(["functional", "api", "ui", "integration"]);
 

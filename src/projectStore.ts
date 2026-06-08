@@ -6,30 +6,71 @@ import type { TestFocus, TestPlan } from "./types.js";
 import type {
   AIChat,
   AIChatSummary,
+  ActivityLog,
   DashboardStats,
   EntityStatus,
   ExportFormat,
   ExportHistory,
   ExportType,
   HistoryStatus,
+  InviteStatus,
+  MemberStatus,
   ModulePriority,
+  ProjectPermissionLevel,
   Project,
   ProjectDatabase,
   ProjectDomain,
   ProjectModule,
   ProjectSummary,
   Requirement,
+  ReviewAction,
+  ReviewComment,
   TestCaseGenerationHistory,
   TestCaseHistoryCompare,
   TestCaseHistoryRecord,
+  UserRole,
+  Workspace,
+  WorkspaceInvite,
+  WorkspaceMember,
+  WorkspacePermission,
+  WorkspaceRole,
 } from "./projectTypes.js";
 
 const currentDir = path.dirname(fileURLToPath(import.meta.url));
 const dataDir = path.resolve(currentDir, "../data");
 const dbFile = path.join(dataDir, "db.json");
 const defaultUserId = "demo-user";
+const defaultWorkspaceId = "workspace_default";
 
 const initialDb: ProjectDatabase = {
+  workspaces: [
+    {
+      id: defaultWorkspaceId,
+      workspaceName: "AI QA Copilot Workspace",
+      description: "Default workspace for existing AI QA Copilot data.",
+      ownerId: defaultUserId,
+      status: "Active",
+      createdAt: new Date().toISOString(),
+      updatedAt: new Date().toISOString(),
+    },
+  ],
+  workspaceMembers: [
+    {
+      id: "member_default",
+      workspaceId: defaultWorkspaceId,
+      userId: defaultUserId,
+      name: "Current User",
+      email: "demo@aiqacopilot.local",
+      role: "Owner",
+      status: "Active",
+      assignedProjects: [],
+      joinedAt: new Date().toISOString(),
+      lastActiveAt: new Date().toISOString(),
+    },
+  ],
+  workspaceInvites: [],
+  workspacePermissions: [],
+  activityLogs: [],
   users: [
     {
       id: defaultUserId,
@@ -44,6 +85,8 @@ const initialDb: ProjectDatabase = {
   histories: [],
   exportHistories: [],
   aiChats: [],
+  reviewComments: [],
+  reviewAuditTrail: [],
 };
 
 let writeQueue = Promise.resolve();
@@ -70,10 +113,22 @@ async function readDb(): Promise<ProjectDatabase> {
   await writeQueue;
   const raw = await readFile(dbFile, "utf8");
   const db = JSON.parse(raw) as ProjectDatabase;
+  const workspaces = db.workspaces?.length ? db.workspaces : initialDb.workspaces;
+  const workspaceMembers = db.workspaceMembers?.length ? db.workspaceMembers : initialDb.workspaceMembers;
   return {
     ...db,
+    workspaces,
+    workspaceMembers,
+    workspaceInvites: db.workspaceInvites ?? [],
+    workspacePermissions: db.workspacePermissions ?? [],
+    activityLogs: db.activityLogs ?? [],
     exportHistories: db.exportHistories ?? [],
-    aiChats: db.aiChats ?? [],
+    aiChats: (db.aiChats ?? []).map(normalizeChat),
+    reviewComments: db.reviewComments ?? [],
+    reviewAuditTrail: db.reviewAuditTrail ?? [],
+    projects: (db.projects ?? []).map(normalizeProject),
+    modules: (db.modules ?? []).map(normalizeModule),
+    requirements: (db.requirements ?? []).map(normalizeRequirement),
     histories: (db.histories ?? []).map(normalizeHistory),
   };
 }
@@ -88,13 +143,33 @@ function countPlanTestCases(plan: TestPlan) {
 }
 
 function normalizeHistory(history: TestCaseGenerationHistory): TestCaseGenerationHistory {
+  const status = history.reviewStatus ?? history.status ?? "Draft";
   return {
     ...history,
     userId: history.userId ?? defaultUserId,
+    workspaceId: history.workspaceId ?? defaultWorkspaceId,
     requirementInput: history.requirementInput ?? history.output.summary,
-    status: history.status ?? "Draft",
+    status,
+    reviewStatus: status,
+    isLocked: history.isLocked ?? (status === "Approved" || status === "Rejected"),
     updatedAt: history.updatedAt ?? history.generatedAt,
   };
+}
+
+function normalizeProject(project: Project): Project {
+  return { ...project, workspaceId: project.workspaceId ?? defaultWorkspaceId };
+}
+
+function normalizeModule(moduleItem: ProjectModule): ProjectModule {
+  return { ...moduleItem, workspaceId: moduleItem.workspaceId ?? defaultWorkspaceId };
+}
+
+function normalizeRequirement(requirement: Requirement): Requirement {
+  return { ...requirement, workspaceId: requirement.workspaceId ?? defaultWorkspaceId };
+}
+
+function normalizeChat(chat: AIChat): AIChat {
+  return { ...chat, workspaceId: chat.workspaceId ?? defaultWorkspaceId };
 }
 
 function enrichHistory(db: ProjectDatabase, history: TestCaseGenerationHistory): TestCaseHistoryRecord {
@@ -117,6 +192,92 @@ function allCases(plan: TestPlan) {
 
 function csvCell(value: unknown) {
   return `"${String(value ?? "").replace(/"/g, '""')}"`;
+}
+
+function currentUser(role: UserRole = "Admin") {
+  return {
+    userId: defaultUserId,
+    userName: "Current User",
+    role,
+  };
+}
+
+function addActivityLog(
+  db: ProjectDatabase,
+  input: {
+    workspaceId?: string;
+    action: string;
+    resourceType: string;
+    resourceId?: string;
+    oldValue?: unknown;
+    newValue?: unknown;
+  },
+) {
+  const user = currentUser("Admin");
+  const log: ActivityLog = {
+    id: createId("activity"),
+    workspaceId: input.workspaceId ?? defaultWorkspaceId,
+    actorId: user.userId,
+    actorName: user.userName,
+    action: input.action,
+    resourceType: input.resourceType,
+    resourceId: input.resourceId,
+    oldValue: input.oldValue,
+    newValue: input.newValue,
+    createdAt: now(),
+  };
+  db.activityLogs.push(log);
+  return log;
+}
+
+function addReviewAudit(
+  db: ProjectDatabase,
+  input: {
+    historyId: string;
+    action: ReviewAction;
+    oldStatus?: HistoryStatus;
+    newStatus?: HistoryStatus;
+    comment?: string;
+    role?: UserRole;
+  },
+) {
+  const user = currentUser(input.role);
+  db.reviewAuditTrail.push({
+    id: createId("audit"),
+    historyId: input.historyId,
+    action: input.action,
+    userId: user.userId,
+    userName: user.userName,
+    role: user.role,
+    oldStatus: input.oldStatus,
+    newStatus: input.newStatus,
+    timestamp: now(),
+    comment: input.comment,
+  });
+}
+
+function addReviewComment(
+  db: ProjectDatabase,
+  input: {
+    historyId: string;
+    actionType: ReviewAction;
+    message: string;
+    role?: UserRole;
+  },
+) {
+  const user = currentUser(input.role);
+  const comment: ReviewComment = {
+    id: createId("comment"),
+    historyId: input.historyId,
+    userId: user.userId,
+    userName: user.userName,
+    role: user.role,
+    message: input.message,
+    actionType: input.actionType,
+    createdAt: now(),
+  };
+  db.reviewComments.push(comment);
+  return comment;
 }
 
 function summarizeProject(db: ProjectDatabase, project: Project): ProjectSummary {
@@ -143,6 +304,9 @@ export async function getDashboardStats(): Promise<DashboardStats> {
   const db = await readDb();
   const projectSummaries = db.projects.map((project) => summarizeProject(db, project));
   const coverageScores = db.histories.map((history) => history.coverageScore);
+  const approvedWithDurations = db.histories
+    .filter((history) => history.reviewStatus === "Approved" && history.submittedAt && history.approvedAt)
+    .map((history) => new Date(history.approvedAt!).getTime() - new Date(history.submittedAt!).getTime());
 
   return {
     totalProjects: db.projects.length,
@@ -154,9 +318,358 @@ export async function getDashboardStats(): Promise<DashboardStats> {
       coverageScores.length === 0
         ? 0
         : Math.round(coverageScores.reduce((total, score) => total + score, 0) / coverageScores.length),
+    pendingReviews: db.histories.filter((history) => history.reviewStatus === "Submitted for Review").length,
+    approvedTestCases: db.histories.filter((history) => history.reviewStatus === "Approved").length,
+    changesRequested: db.histories.filter((history) => history.reviewStatus === "Changes Requested").length,
+    rejectedItems: db.histories.filter((history) => history.reviewStatus === "Rejected").length,
+    averageApprovalTimeHours:
+      approvedWithDurations.length === 0
+        ? 0
+        : Math.round(
+            approvedWithDurations.reduce((total, duration) => total + duration, 0) /
+              approvedWithDurations.length /
+              36_000,
+          ) / 100,
     recentlyUpdatedProjects: projectSummaries
       .sort((a, b) => b.lastUpdatedAt.localeCompare(a.lastUpdatedAt))
       .slice(0, 5),
+  };
+}
+
+export interface AnalyticsFilters {
+  workspaceId?: string;
+  projectId?: string;
+  moduleId?: string;
+  userId?: string;
+  status?: HistoryStatus;
+  dateFrom?: string;
+  dateTo?: string;
+}
+
+function dateKey(value: string) {
+  return value.slice(0, 10);
+}
+
+function average(values: number[]) {
+  if (values.length === 0) return 0;
+  return Math.round(values.reduce((total, value) => total + value, 0) / values.length);
+}
+
+function increment(map: Map<string, number>, key: string, value = 1) {
+  map.set(key, (map.get(key) ?? 0) + value);
+}
+
+function toSeries<TKey extends string>(map: Map<string, number>, valueKey: TKey) {
+  return [...map.entries()]
+    .sort(([a], [b]) => a.localeCompare(b))
+    .map(([name, value]) => ({ name, [valueKey]: value }) as { name: string } & Record<TKey, number>);
+}
+
+function matchesAnalyticsFilters(history: TestCaseGenerationHistory, filters: AnalyticsFilters) {
+  return (
+    (!filters.workspaceId || history.workspaceId === filters.workspaceId) &&
+    (!filters.projectId || history.projectId === filters.projectId) &&
+    (!filters.moduleId || history.moduleId === filters.moduleId) &&
+    (!filters.userId || history.userId === filters.userId || history.generatedBy === filters.userId) &&
+    (!filters.status || history.reviewStatus === filters.status || history.status === filters.status) &&
+    (!filters.dateFrom || history.generatedAt >= filters.dateFrom) &&
+    (!filters.dateTo || history.generatedAt <= filters.dateTo)
+  );
+}
+
+function analyticsData(db: ProjectDatabase, filters: AnalyticsFilters) {
+  const histories = db.histories.filter((history) => matchesAnalyticsFilters(history, filters));
+  const projectIds = new Set(histories.map((history) => history.projectId));
+  if (filters.projectId) projectIds.add(filters.projectId);
+  const moduleIds = new Set(histories.map((history) => history.moduleId));
+  if (filters.moduleId) moduleIds.add(filters.moduleId);
+  const workspaceId = filters.workspaceId;
+  const projects = db.projects.filter(
+    (project) =>
+      (!workspaceId || project.workspaceId === workspaceId) &&
+      (!filters.projectId || project.id === filters.projectId) &&
+      (projectIds.size === 0 || projectIds.has(project.id) || !filters.dateFrom),
+  );
+  const modules = db.modules.filter(
+    (moduleItem) =>
+      (!workspaceId || moduleItem.workspaceId === workspaceId) &&
+      (!filters.projectId || moduleItem.projectId === filters.projectId) &&
+      (!filters.moduleId || moduleItem.id === filters.moduleId),
+  );
+  const requirements = db.requirements.filter(
+    (requirement) =>
+      (!workspaceId || requirement.workspaceId === workspaceId) &&
+      (!filters.projectId || requirement.projectId === filters.projectId) &&
+      (!filters.moduleId || requirement.moduleId === filters.moduleId),
+  );
+  const exports = db.exportHistories.filter(
+    (exportRecord) =>
+      (!workspaceId || exportRecord.workspaceId === workspaceId) &&
+      (!filters.projectId || exportRecord.projectId === filters.projectId) &&
+      (!filters.userId || exportRecord.userId === filters.userId) &&
+      (!filters.dateFrom || exportRecord.createdAt >= filters.dateFrom) &&
+      (!filters.dateTo || exportRecord.createdAt <= filters.dateTo),
+  );
+  const aiChats = db.aiChats.filter(
+    (chat) =>
+      (!workspaceId || chat.workspaceId === workspaceId) &&
+      (!filters.projectId || chat.projectId === filters.projectId) &&
+      (!filters.moduleId || chat.moduleId === filters.moduleId) &&
+      (!filters.userId || chat.userId === filters.userId) &&
+      (!filters.dateFrom || chat.createdAt >= filters.dateFrom) &&
+      (!filters.dateTo || chat.createdAt <= filters.dateTo),
+  );
+  return { histories, projects, modules, requirements, exports, aiChats };
+}
+
+export async function getAnalyticsSummary(filters: AnalyticsFilters) {
+  const db = await readDb();
+  const { histories, projects, modules, requirements, exports, aiChats } = analyticsData(db, filters);
+  const scores = histories.map((history) => history.coverageScore);
+  return {
+    totalProjects: projects.length,
+    totalModules: modules.length,
+    totalRequirements: requirements.length,
+    totalTestCasesGenerated: histories.reduce((total, history) => total + countPlanTestCases(history.output), 0),
+    averageCoverageScore: average(scores),
+    approvedTestCases: histories.filter((history) => history.reviewStatus === "Approved").length,
+    pendingReviews: histories.filter((history) => history.reviewStatus === "Submitted for Review").length,
+    changesRequested: histories.filter((history) => history.reviewStatus === "Changes Requested").length,
+    rejectedTestCases: histories.filter((history) => history.reviewStatus === "Rejected").length,
+    totalExports: exports.reduce((total, exportRecord) => total + exportRecord.totalRecords, 0),
+    aiChatInteractions: aiChats.reduce((total, chat) => total + chat.messages.filter((message) => message.role === "user").length, 0),
+  };
+}
+
+export async function getAnalyticsCoverage(filters: AnalyticsFilters) {
+  const db = await readDb();
+  const { histories } = analyticsData(db, filters);
+  const byProject = db.projects
+    .map((project) => {
+      const projectHistories = histories.filter((history) => history.projectId === project.id);
+      return { projectId: project.id, projectName: project.name, averageCoverageScore: average(projectHistories.map((history) => history.coverageScore)) };
+    })
+    .filter((item) => item.averageCoverageScore > 0);
+  const trendTotals = new Map<string, { total: number; count: number }>();
+  histories.forEach((history) => {
+    const key = dateKey(history.generatedAt);
+    const current = trendTotals.get(key) ?? { total: 0, count: 0 };
+    trendTotals.set(key, { total: current.total + history.coverageScore, count: current.count + 1 });
+  });
+  const trend = [...trendTotals.entries()]
+    .sort(([a], [b]) => a.localeCompare(b))
+    .map(([date, value]) => ({ date, averageCoverageScore: Math.round(value.total / value.count) }));
+  const requirementRows = histories.map((history) => {
+    const requirement = db.requirements.find((item) => item.id === history.requirementId);
+    const project = db.projects.find((item) => item.id === history.projectId);
+    const moduleItem = db.modules.find((item) => item.id === history.moduleId);
+    return {
+      historyId: history.id,
+      requirementId: history.requirementId,
+      requirementTitle: requirement?.title ?? "Untitled requirement",
+      projectName: project?.name ?? "Unknown project",
+      moduleName: moduleItem?.name ?? "Unknown module",
+      coverageScore: history.coverageScore,
+      version: history.version,
+      generatedAt: history.generatedAt,
+    };
+  });
+  return {
+    byProject,
+    trend,
+    lowCoverageRequirements: requirementRows
+      .filter((row) => row.coverageScore < 70)
+      .sort((a, b) => a.coverageScore - b.coverageScore)
+      .slice(0, 10),
+    highCoverageRequirements: requirementRows
+      .filter((row) => row.coverageScore >= 80)
+      .sort((a, b) => b.coverageScore - a.coverageScore)
+      .slice(0, 10),
+    recommendation: "Coverage is low. Consider adding edge cases, negative cases, and security test cases.",
+  };
+}
+
+export async function getAnalyticsGeneration(filters: AnalyticsFilters) {
+  const db = await readDb();
+  const { histories } = analyticsData(db, filters);
+  const generatedByDate = new Map<string, number>();
+  const byProject = new Map<string, number>();
+  const byUser = new Map<string, number>();
+  const byModule = new Map<string, number>();
+  const distribution = { positive: 0, negative: 0, edge: 0 };
+  histories.forEach((history) => {
+    increment(generatedByDate, dateKey(history.generatedAt));
+    increment(byProject, db.projects.find((project) => project.id === history.projectId)?.name ?? "Unknown project", countPlanTestCases(history.output));
+    increment(byUser, history.generatedBy, countPlanTestCases(history.output));
+    increment(byModule, db.modules.find((moduleItem) => moduleItem.id === history.moduleId)?.name ?? "Unknown module", countPlanTestCases(history.output));
+    distribution.positive += history.output.positive.length;
+    distribution.negative += history.output.negative.length;
+    distribution.edge += history.output.edge.length;
+  });
+  return {
+    generatedOverTime: toSeries(generatedByDate, "versions"),
+    caseDistribution: [
+      { name: "Positive", value: distribution.positive },
+      { name: "Negative", value: distribution.negative },
+      { name: "Edge", value: distribution.edge },
+    ],
+    generatedByProject: toSeries(byProject, "testCases"),
+    generatedByUser: toSeries(byUser, "testCases"),
+    mostActiveModules: toSeries(byModule, "testCases").sort((a, b) => b.testCases - a.testCases).slice(0, 10),
+  };
+}
+
+export async function getAnalyticsReview(filters: AnalyticsFilters) {
+  const db = await readDb();
+  const { histories } = analyticsData(db, filters);
+  const statuses: HistoryStatus[] = ["Draft", "Submitted for Review", "Changes Requested", "Approved", "Rejected"];
+  const reviewerActivity = new Map<string, number>();
+  db.reviewAuditTrail
+    .filter((audit) => ["Approved", "Changes Requested", "Rejected"].includes(audit.action))
+    .forEach((audit) => increment(reviewerActivity, audit.userName));
+  const approvalDurations = histories
+    .filter((history) => history.submittedAt && history.approvedAt)
+    .map((history) => new Date(history.approvedAt!).getTime() - new Date(history.submittedAt!).getTime());
+  const bottlenecks = histories
+    .filter((history) => history.reviewStatus === "Submitted for Review" && history.submittedAt)
+    .map((history) => ({
+      historyId: history.id,
+      requirementTitle: db.requirements.find((requirement) => requirement.id === history.requirementId)?.title ?? "Untitled requirement",
+      projectName: db.projects.find((project) => project.id === history.projectId)?.name ?? "Unknown project",
+      submittedAt: history.submittedAt!,
+      waitingDays: Math.max(0, Math.round((Date.now() - new Date(history.submittedAt!).getTime()) / 86_400_000)),
+    }))
+    .sort((a, b) => b.waitingDays - a.waitingDays)
+    .slice(0, 10);
+  return {
+    pendingReviewCount: histories.filter((history) => history.reviewStatus === "Submitted for Review").length,
+    approvedCount: histories.filter((history) => history.reviewStatus === "Approved").length,
+    rejectedCount: histories.filter((history) => history.reviewStatus === "Rejected").length,
+    changesRequestedCount: histories.filter((history) => history.reviewStatus === "Changes Requested").length,
+    averageApprovalTimeHours:
+      approvalDurations.length === 0
+        ? 0
+        : Math.round(approvalDurations.reduce((total, value) => total + value, 0) / approvalDurations.length / 36_000) / 100,
+    statusDistribution: statuses.map((status) => ({
+      name: status,
+      value: histories.filter((history) => history.reviewStatus === status).length,
+    })),
+    reviewBottlenecks: bottlenecks,
+    reviewerActivity: toSeries(reviewerActivity, "reviewsCompleted"),
+  };
+}
+
+export async function getAnalyticsProjectsHealth(filters: AnalyticsFilters) {
+  const db = await readDb();
+  const { projects } = analyticsData(db, filters);
+  return projects.map((project) => {
+    const histories = db.histories.filter((history) => history.projectId === project.id && matchesAnalyticsFilters(history, filters));
+    const averageCoverageScore = average(histories.map((history) => history.coverageScore));
+    const pendingReviews = histories.filter((history) => history.reviewStatus === "Submitted for Review").length;
+    const rejectedItems = histories.filter((history) => history.reviewStatus === "Rejected").length;
+    const status =
+      averageCoverageScore < 60 || rejectedItems >= 3
+        ? "Critical"
+        : averageCoverageScore < 80 || pendingReviews >= 5
+          ? "Needs Attention"
+          : "Healthy";
+    return {
+      projectId: project.id,
+      projectName: project.name,
+      totalRequirements: db.requirements.filter((requirement) => requirement.projectId === project.id).length,
+      totalGeneratedVersions: histories.length,
+      averageCoverageScore,
+      pendingReviews,
+      approvedVersions: histories.filter((history) => history.reviewStatus === "Approved").length,
+      lastActivityDate: [project.updatedAt, ...histories.map((history) => history.updatedAt)].sort().at(-1) ?? project.updatedAt,
+      healthStatus: status,
+    };
+  });
+}
+
+export async function getAnalyticsUsersProductivity(filters: AnalyticsFilters) {
+  const db = await readDb();
+  const { histories, exports, aiChats } = analyticsData(db, filters);
+  const members = filters.workspaceId
+    ? db.workspaceMembers.filter((member) => member.workspaceId === filters.workspaceId)
+    : db.workspaceMembers;
+  return members.map((member) => ({
+    userId: member.userId,
+    userName: member.name,
+    role: member.role,
+    testCasesGenerated: histories
+      .filter((history) => history.userId === member.userId)
+      .reduce((total, history) => total + countPlanTestCases(history.output), 0),
+    reviewsCompleted: db.reviewAuditTrail.filter(
+      (audit) => audit.userId === member.userId && ["Approved", "Changes Requested", "Rejected"].includes(audit.action),
+    ).length,
+    approvedVersions: histories.filter((history) => history.approvedBy === member.userId || history.generatedBy === member.name && history.reviewStatus === "Approved").length,
+    aiChatUsage: aiChats
+      .filter((chat) => chat.userId === member.userId)
+      .reduce((total, chat) => total + chat.messages.filter((message) => message.role === "user").length, 0),
+    exports: exports.filter((exportRecord) => exportRecord.userId === member.userId).length,
+    lastActiveDate: member.lastActiveAt,
+  }));
+}
+
+export async function getAnalyticsAIUsage(filters: AnalyticsFilters) {
+  const db = await readDb();
+  const { histories, aiChats } = analyticsData(db, filters);
+  const overTime = new Map<string, number>();
+  const promptCounts = new Map<string, number>();
+  const quickPrompts = ["Missing Test Cases", "Improve Coverage", "Security Test Cases", "API Test Cases", "Edge Cases", "Regression Test Cases"];
+  aiChats.forEach((chat) => {
+    chat.messages
+      .filter((message) => message.role === "user")
+      .forEach((message) => {
+        increment(overTime, dateKey(message.createdAt));
+        const prompt = quickPrompts.find((quickPrompt) => message.content.toLowerCase().includes(quickPrompt.toLowerCase()));
+        if (prompt) increment(promptCounts, prompt);
+      });
+  });
+  const savedFromChat = histories.filter((history) => history.aiModelUsed.includes("AI Chat")).length;
+  const improvements = histories
+    .filter((history) => history.version > 1)
+    .map((history) => {
+      const previous = db.histories.find(
+        (item) => item.requirementId === history.requirementId && item.version === history.version - 1,
+      );
+      return previous ? history.coverageScore - previous.coverageScore : 0;
+    })
+    .filter((value) => value !== 0);
+  return {
+    totalAIGenerations: histories.length,
+    totalAIChatMessages: aiChats.reduce((total, chat) => total + chat.messages.filter((message) => message.role === "user").length, 0),
+    mostUsedQuickPrompts: toSeries(promptCounts, "count").sort((a, b) => b.count - a.count),
+    averageCoverageImprovementAfterAIChat: average(improvements),
+    aiGeneratedVersionsSaved: savedFromChat,
+    usageOverTime: toSeries(overTime, "messages"),
+  };
+}
+
+export async function getAnalyticsExports(filters: AnalyticsFilters) {
+  const db = await readDb();
+  const { histories, exports } = analyticsData(db, filters);
+  const byProject = new Map<string, number>();
+  const byUser = new Map<string, number>();
+  const byRequirement = new Map<string, number>();
+  exports.forEach((exportRecord) => {
+    increment(byProject, db.projects.find((project) => project.id === exportRecord.projectId)?.name ?? "Project export", exportRecord.totalRecords);
+    increment(byUser, db.users.find((user) => user.id === exportRecord.userId)?.name ?? "Current User", exportRecord.totalRecords);
+    if (exportRecord.requirementId) {
+      increment(byRequirement, db.requirements.find((requirement) => requirement.id === exportRecord.requirementId)?.title ?? "Requirement", exportRecord.totalRecords);
+    }
+  });
+  return {
+    totalExcelExports: exports.filter((exportRecord) => exportRecord.exportFormat === "excel").length,
+    totalPdfExports: exports.filter((exportRecord) => exportRecord.exportFormat === "pdf").length,
+    exportsByProject: toSeries(byProject, "exports"),
+    exportsByUser: toSeries(byUser, "exports"),
+    mostExportedRequirements: toSeries(byRequirement, "exports").sort((a, b) => b.exports - a.exports).slice(0, 10),
+    approvedVsDraftExportCount: [
+      { name: "Approved", value: histories.filter((history) => history.reviewStatus === "Approved").length },
+      { name: "Draft", value: histories.filter((history) => history.reviewStatus === "Draft").length },
+    ],
   };
 }
 
@@ -194,6 +707,7 @@ export async function createProject(input: {
   const timestamp = now();
   const project: Project = {
     id: createId("project"),
+    workspaceId: defaultWorkspaceId,
     userId: defaultUserId,
     name: input.name,
     description: input.description,
@@ -203,6 +717,12 @@ export async function createProject(input: {
     updatedAt: timestamp,
   };
   db.projects.push(project);
+  addActivityLog(db, {
+    action: "Project created",
+    resourceType: "Project",
+    resourceId: project.id,
+    newValue: { name: project.name },
+  });
   await writeDb(db);
   return summarizeProject(db, project);
 }
@@ -247,6 +767,7 @@ export async function createModule(input: {
   const timestamp = now();
   const moduleItem: ProjectModule = {
     id: createId("module"),
+    workspaceId: defaultWorkspaceId,
     projectId: input.projectId,
     name: input.name,
     description: input.description,
@@ -304,6 +825,7 @@ export async function createRequirement(input: {
   const timestamp = now();
   const requirement: Requirement = {
     id: createId("requirement"),
+    workspaceId: defaultWorkspaceId,
     projectId: input.projectId,
     moduleId: input.moduleId,
     title: input.title,
@@ -370,6 +892,7 @@ export async function saveGenerationHistory(input: {
   if (!requirement) {
     requirement = {
       id: createId("requirement"),
+      workspaceId: defaultWorkspaceId,
       projectId: input.projectId,
       moduleId: input.moduleId,
       title: titleFromRequirement(input.requirementText),
@@ -391,6 +914,7 @@ export async function saveGenerationHistory(input: {
   const history: TestCaseGenerationHistory = {
     id: createId("history"),
     userId: defaultUserId,
+    workspaceId: defaultWorkspaceId,
     projectId: input.projectId,
     moduleId: input.moduleId,
     requirementId: requirement.id,
@@ -402,6 +926,8 @@ export async function saveGenerationHistory(input: {
     testType: input.testType,
     coverageScore: input.output.coverageAnalysis.coverageScore,
     status: "Draft",
+    reviewStatus: "Draft",
+    isLocked: false,
     updatedAt: timestamp,
     output: input.output,
   };
@@ -479,8 +1005,19 @@ export async function updateHistoryStatus(historyId: string, status: HistoryStat
   const db = await readDb();
   const history = db.histories.find((item) => item.id === historyId);
   if (!history) return null;
+  const oldStatus = history.reviewStatus;
   history.status = status;
+  history.reviewStatus = status;
+  history.isLocked = status === "Approved" || status === "Rejected";
   history.updatedAt = now();
+  addReviewAudit(db, {
+    historyId,
+    action: status === "Approved" ? "Approved" : status === "Rejected" ? "Rejected" : "Comment Added",
+    oldStatus,
+    newStatus: status,
+    comment: "Status updated manually",
+    role: "Admin",
+  });
   await writeDb(db);
   return enrichHistory(db, history);
 }
@@ -587,6 +1124,9 @@ export async function recordExportHistory(input: {
   const exportRecord: ExportHistory = {
     id: createId("export"),
     userId: defaultUserId,
+    workspaceId: input.projectId
+      ? db.projects.find((project) => project.id === input.projectId)?.workspaceId ?? defaultWorkspaceId
+      : defaultWorkspaceId,
     exportType: input.exportType,
     exportFormat: input.exportFormat,
     projectId: input.projectId,
@@ -595,6 +1135,13 @@ export async function recordExportHistory(input: {
     createdAt: now(),
   };
   db.exportHistories.push(exportRecord);
+  addActivityLog(db, {
+    workspaceId: exportRecord.workspaceId,
+    action: exportRecord.exportType === "version" ? "Test case exported" : "Test cases exported",
+    resourceType: "ExportHistory",
+    resourceId: exportRecord.id,
+    newValue: { format: exportRecord.exportFormat, totalRecords: exportRecord.totalRecords },
+  });
   await writeDb(db);
   return exportRecord;
 }
@@ -700,6 +1247,7 @@ export async function appendAIChatMessages(input: {
     chat = {
       id: createId("chat"),
       userId: defaultUserId,
+      workspaceId: defaultWorkspaceId,
       projectId: input.projectId,
       moduleId: input.moduleId,
       requirementId: input.requirementId,
@@ -750,6 +1298,7 @@ export async function saveChatResponseAsNewVersion(input: { chatId: string; hist
   const history: TestCaseGenerationHistory = {
     id: createId("history"),
     userId: defaultUserId,
+    workspaceId: defaultWorkspaceId,
     projectId: chat.projectId,
     moduleId: chat.moduleId,
     requirementId: chat.requirementId,
@@ -761,6 +1310,8 @@ export async function saveChatResponseAsNewVersion(input: { chatId: string; hist
     testType: sourceHistory.testType,
     coverageScore: sourceHistory.coverageScore,
     status: "Draft",
+    reviewStatus: "Draft",
+    isLocked: false,
     updatedAt: timestamp,
     output,
   };
@@ -768,4 +1319,461 @@ export async function saveChatResponseAsNewVersion(input: { chatId: string; hist
   db.histories.push(history);
   await writeDb(db);
   return enrichHistory(db, history);
+}
+
+export async function submitHistoryForReview(historyId: string, comment?: string) {
+  const db = await readDb();
+  const history = db.histories.find((item) => item.id === historyId);
+  if (!history) return null;
+  if (!["Draft", "Changes Requested"].includes(history.reviewStatus)) {
+    throw new Error("Only Draft or Changes Requested versions can be submitted for review.");
+  }
+  const oldStatus = history.reviewStatus;
+  const timestamp = now();
+  history.status = "Submitted for Review";
+  history.reviewStatus = "Submitted for Review";
+  history.submittedBy = currentUser("QA Engineer").userName;
+  history.submittedAt = timestamp;
+  history.updatedAt = timestamp;
+  if (comment) addReviewComment(db, { historyId, actionType: "Submitted for Review", message: comment, role: "QA Engineer" });
+  addReviewAudit(db, {
+    historyId,
+    action: "Submitted for Review",
+    oldStatus,
+    newStatus: "Submitted for Review",
+    comment,
+    role: "QA Engineer",
+  });
+  await writeDb(db);
+  return enrichHistory(db, history);
+}
+
+export async function getReviewQueue() {
+  const db = await readDb();
+  return db.histories
+    .filter((history) => history.reviewStatus === "Submitted for Review")
+    .map((history) => enrichHistory(db, history))
+    .sort((a, b) => (b.submittedAt ?? b.updatedAt).localeCompare(a.submittedAt ?? a.updatedAt));
+}
+
+export async function getReviewDetail(historyId: string) {
+  const db = await readDb();
+  const history = db.histories.find((item) => item.id === historyId);
+  if (!history) return null;
+  return {
+    history: enrichHistory(db, history),
+    comments: db.reviewComments
+      .filter((comment) => comment.historyId === historyId)
+      .sort((a, b) => a.createdAt.localeCompare(b.createdAt)),
+    auditTrail: db.reviewAuditTrail
+      .filter((audit) => audit.historyId === historyId)
+      .sort((a, b) => a.timestamp.localeCompare(b.timestamp)),
+  };
+}
+
+export async function approveHistory(historyId: string, comment?: string) {
+  const db = await readDb();
+  const history = db.histories.find((item) => item.id === historyId);
+  if (!history) return null;
+  const oldStatus = history.reviewStatus;
+  const timestamp = now();
+  history.status = "Approved";
+  history.reviewStatus = "Approved";
+  history.reviewedBy = currentUser("QA Lead").userName;
+  history.reviewedAt = timestamp;
+  history.approvedBy = currentUser("QA Lead").userName;
+  history.approvedAt = timestamp;
+  history.isLocked = true;
+  history.updatedAt = timestamp;
+  if (comment) addReviewComment(db, { historyId, actionType: "Approved", message: comment, role: "QA Lead" });
+  addReviewAudit(db, { historyId, action: "Approved", oldStatus, newStatus: "Approved", comment, role: "QA Lead" });
+  await writeDb(db);
+  return enrichHistory(db, history);
+}
+
+export async function requestHistoryChanges(historyId: string, comment: string) {
+  const db = await readDb();
+  const history = db.histories.find((item) => item.id === historyId);
+  if (!history) return null;
+  const oldStatus = history.reviewStatus;
+  const timestamp = now();
+  history.status = "Changes Requested";
+  history.reviewStatus = "Changes Requested";
+  history.reviewedBy = currentUser("QA Lead").userName;
+  history.reviewedAt = timestamp;
+  history.isLocked = false;
+  history.updatedAt = timestamp;
+  addReviewComment(db, { historyId, actionType: "Changes Requested", message: comment, role: "QA Lead" });
+  addReviewAudit(db, {
+    historyId,
+    action: "Changes Requested",
+    oldStatus,
+    newStatus: "Changes Requested",
+    comment,
+    role: "QA Lead",
+  });
+  await writeDb(db);
+  return enrichHistory(db, history);
+}
+
+export async function rejectHistory(historyId: string, comment: string) {
+  const db = await readDb();
+  const history = db.histories.find((item) => item.id === historyId);
+  if (!history) return null;
+  const oldStatus = history.reviewStatus;
+  const timestamp = now();
+  history.status = "Rejected";
+  history.reviewStatus = "Rejected";
+  history.reviewedBy = currentUser("QA Lead").userName;
+  history.reviewedAt = timestamp;
+  history.rejectedBy = currentUser("QA Lead").userName;
+  history.rejectedAt = timestamp;
+  history.isLocked = true;
+  history.updatedAt = timestamp;
+  addReviewComment(db, { historyId, actionType: "Rejected", message: comment, role: "QA Lead" });
+  addReviewAudit(db, { historyId, action: "Rejected", oldStatus, newStatus: "Rejected", comment, role: "QA Lead" });
+  await writeDb(db);
+  return enrichHistory(db, history);
+}
+
+export async function addHistoryReviewComment(historyId: string, message: string) {
+  const db = await readDb();
+  const history = db.histories.find((item) => item.id === historyId);
+  if (!history) return null;
+  const comment = addReviewComment(db, { historyId, actionType: "Comment Added", message, role: "QA Engineer" });
+  addReviewAudit(db, { historyId, action: "Comment Added", comment: message, role: "QA Engineer" });
+  await writeDb(db);
+  return comment;
+}
+
+export async function getHistoryReviewComments(historyId: string) {
+  const db = await readDb();
+  return db.reviewComments
+    .filter((comment) => comment.historyId === historyId)
+    .sort((a, b) => a.createdAt.localeCompare(b.createdAt));
+}
+
+export async function listWorkspaces() {
+  const db = await readDb();
+  return db.workspaces.sort((a, b) => b.updatedAt.localeCompare(a.updatedAt));
+}
+
+export async function getWorkspace(workspaceId: string) {
+  const db = await readDb();
+  const workspace = db.workspaces.find((item) => item.id === workspaceId);
+  if (!workspace) return null;
+  return {
+    workspace,
+    members: db.workspaceMembers.filter((member) => member.workspaceId === workspaceId),
+    invites: db.workspaceInvites.filter((invite) => invite.workspaceId === workspaceId),
+    activityLogs: db.activityLogs
+      .filter((log) => log.workspaceId === workspaceId)
+      .sort((a, b) => b.createdAt.localeCompare(a.createdAt)),
+  };
+}
+
+export async function createWorkspace(input: { workspaceName: string; description: string; logo?: string }) {
+  const db = await readDb();
+  const timestamp = now();
+  const workspace: Workspace = {
+    id: createId("workspace"),
+    workspaceName: input.workspaceName,
+    description: input.description,
+    logo: input.logo,
+    ownerId: defaultUserId,
+    status: "Active",
+    createdAt: timestamp,
+    updatedAt: timestamp,
+  };
+  const member: WorkspaceMember = {
+    id: createId("member"),
+    workspaceId: workspace.id,
+    userId: defaultUserId,
+    name: "Current User",
+    email: "demo@aiqacopilot.local",
+    role: "Owner",
+    status: "Active",
+    assignedProjects: [],
+    joinedAt: timestamp,
+    lastActiveAt: timestamp,
+  };
+  db.workspaces.push(workspace);
+  db.workspaceMembers.push(member);
+  addActivityLog(db, {
+    workspaceId: workspace.id,
+    action: "Workspace created",
+    resourceType: "Workspace",
+    resourceId: workspace.id,
+    newValue: { workspaceName: workspace.workspaceName },
+  });
+  await writeDb(db);
+  return workspace;
+}
+
+export async function updateWorkspace(
+  workspaceId: string,
+  input: Partial<Pick<Workspace, "workspaceName" | "description" | "logo" | "status">>,
+) {
+  const db = await readDb();
+  const workspace = db.workspaces.find((item) => item.id === workspaceId);
+  if (!workspace) return null;
+  const oldValue = { ...workspace };
+  Object.assign(workspace, input, { updatedAt: now() });
+  addActivityLog(db, {
+    workspaceId,
+    action: input.status === "Archived" ? "Workspace archived" : "Workspace updated",
+    resourceType: "Workspace",
+    resourceId: workspaceId,
+    oldValue,
+    newValue: input,
+  });
+  await writeDb(db);
+  return workspace;
+}
+
+export async function deleteWorkspace(workspaceId: string) {
+  if (workspaceId === defaultWorkspaceId) {
+    throw new Error("Default workspace cannot be deleted.");
+  }
+  const db = await readDb();
+  const workspace = db.workspaces.find((item) => item.id === workspaceId);
+  if (!workspace) return false;
+  db.workspaces = db.workspaces.filter((item) => item.id !== workspaceId);
+  db.workspaceMembers = db.workspaceMembers.filter((item) => item.workspaceId !== workspaceId);
+  db.workspaceInvites = db.workspaceInvites.filter((item) => item.workspaceId !== workspaceId);
+  db.workspacePermissions = db.workspacePermissions.filter((item) => item.workspaceId !== workspaceId);
+  db.activityLogs = db.activityLogs.filter((item) => item.workspaceId !== workspaceId);
+  await writeDb(db);
+  return true;
+}
+
+export async function listWorkspaceMembers(workspaceId: string) {
+  const db = await readDb();
+  return db.workspaceMembers.filter((member) => member.workspaceId === workspaceId);
+}
+
+export async function updateWorkspaceMemberRole(workspaceId: string, memberId: string, role: WorkspaceRole) {
+  const db = await readDb();
+  const member = db.workspaceMembers.find((item) => item.workspaceId === workspaceId && item.id === memberId);
+  if (!member) return null;
+  if (member.role === "Owner") throw new Error("Owner role cannot be changed.");
+  const oldValue = member.role;
+  member.role = role;
+  member.lastActiveAt = now();
+  addActivityLog(db, {
+    workspaceId,
+    action: "Role changed",
+    resourceType: "WorkspaceMember",
+    resourceId: memberId,
+    oldValue,
+    newValue: role,
+  });
+  await writeDb(db);
+  return member;
+}
+
+export async function updateWorkspaceMemberProjects(
+  workspaceId: string,
+  memberId: string,
+  assignedProjects: WorkspaceMember["assignedProjects"],
+) {
+  const db = await readDb();
+  const member = db.workspaceMembers.find((item) => item.workspaceId === workspaceId && item.id === memberId);
+  if (!member) return null;
+  const oldValue = member.assignedProjects;
+  member.assignedProjects = assignedProjects;
+  addActivityLog(db, {
+    workspaceId,
+    action: "Project assigned",
+    resourceType: "WorkspaceMember",
+    resourceId: memberId,
+    oldValue,
+    newValue: assignedProjects,
+  });
+  await writeDb(db);
+  return member;
+}
+
+export async function deactivateWorkspaceMember(workspaceId: string, memberId: string) {
+  const db = await readDb();
+  const member = db.workspaceMembers.find((item) => item.workspaceId === workspaceId && item.id === memberId);
+  if (!member) return null;
+  if (member.role === "Owner") throw new Error("Owner cannot be deactivated.");
+  member.status = "Inactive";
+  addActivityLog(db, {
+    workspaceId,
+    action: "Member deactivated",
+    resourceType: "WorkspaceMember",
+    resourceId: memberId,
+  });
+  await writeDb(db);
+  return member;
+}
+
+export async function removeWorkspaceMember(workspaceId: string, memberId: string) {
+  const db = await readDb();
+  const member = db.workspaceMembers.find((item) => item.workspaceId === workspaceId && item.id === memberId);
+  if (!member) return false;
+  if (member.role === "Owner") throw new Error("Owner cannot be removed.");
+  member.status = "Removed";
+  addActivityLog(db, {
+    workspaceId,
+    action: "Member removed",
+    resourceType: "WorkspaceMember",
+    resourceId: memberId,
+  });
+  await writeDb(db);
+  return true;
+}
+
+export async function createWorkspaceInvite(input: {
+  workspaceId: string;
+  email: string;
+  role: WorkspaceRole;
+  assignedProjects: WorkspaceInvite["assignedProjects"];
+  message?: string;
+}) {
+  const db = await readDb();
+  const workspace = db.workspaces.find((item) => item.id === input.workspaceId);
+  if (!workspace) return null;
+  const invite: WorkspaceInvite = {
+    id: createId("invite"),
+    workspaceId: input.workspaceId,
+    email: input.email,
+    role: input.role,
+    assignedProjects: input.assignedProjects,
+    message: input.message,
+    token: crypto.randomUUID(),
+    status: "Pending",
+    invitedBy: defaultUserId,
+    expiresAt: new Date(Date.now() + 7 * 24 * 60 * 60 * 1000).toISOString(),
+    createdAt: now(),
+  };
+  db.workspaceInvites.push(invite);
+  addActivityLog(db, {
+    workspaceId: input.workspaceId,
+    action: "Member invited",
+    resourceType: "WorkspaceInvite",
+    resourceId: invite.id,
+    newValue: { email: invite.email, role: invite.role },
+  });
+  await writeDb(db);
+  return { ...invite, inviteLink: `/invite/${invite.token}` };
+}
+
+export async function listWorkspaceInvites(workspaceId: string) {
+  const db = await readDb();
+  return db.workspaceInvites.filter((invite) => invite.workspaceId === workspaceId);
+}
+
+export async function acceptWorkspaceInvite(token: string) {
+  const db = await readDb();
+  const invite = db.workspaceInvites.find((item) => item.token === token);
+  if (!invite) return null;
+  if (invite.status !== "Pending") throw new Error("Invite is not pending.");
+  invite.status = "Accepted";
+  const timestamp = now();
+  const member: WorkspaceMember = {
+    id: createId("member"),
+    workspaceId: invite.workspaceId,
+    userId: createId("user"),
+    name: invite.email.split("@")[0] ?? "Invited User",
+    email: invite.email,
+    role: invite.role,
+    status: "Active",
+    assignedProjects: invite.assignedProjects,
+    joinedAt: timestamp,
+    lastActiveAt: timestamp,
+  };
+  db.workspaceMembers.push(member);
+  addActivityLog(db, {
+    workspaceId: invite.workspaceId,
+    action: "Member joined",
+    resourceType: "WorkspaceMember",
+    resourceId: member.id,
+    newValue: { email: member.email, role: member.role },
+  });
+  await writeDb(db);
+  return member;
+}
+
+export async function updateWorkspaceInviteStatus(workspaceId: string, inviteId: string, status: InviteStatus) {
+  const db = await readDb();
+  const invite = db.workspaceInvites.find((item) => item.workspaceId === workspaceId && item.id === inviteId);
+  if (!invite) return null;
+  invite.status = status;
+  addActivityLog(db, {
+    workspaceId,
+    action: status === "Revoked" ? "Invite revoked" : "Invite updated",
+    resourceType: "WorkspaceInvite",
+    resourceId: inviteId,
+    newValue: { status },
+  });
+  await writeDb(db);
+  return invite;
+}
+
+export async function getWorkspacePermissions(workspaceId: string) {
+  const db = await readDb();
+  const member = db.workspaceMembers.find(
+    (item) => item.workspaceId === workspaceId && item.userId === defaultUserId,
+  );
+  return {
+    userId: defaultUserId,
+    role: member?.role ?? "Owner",
+    permissions: permissionsForRole(member?.role ?? "Owner"),
+    assignedProjects: member?.assignedProjects ?? [],
+  };
+}
+
+export async function getCurrentWorkspaceMember(workspaceId: string) {
+  const db = await readDb();
+  return db.workspaceMembers.find(
+    (member) => member.workspaceId === workspaceId && member.userId === defaultUserId && member.status === "Active",
+  ) ?? null;
+}
+
+export function permissionsForRole(role: WorkspaceRole) {
+  const matrix: Record<WorkspaceRole, string[]> = {
+    Owner: ["*"],
+    Admin: ["manage_projects", "manage_members", "review", "export", "ai_chat"],
+    "QA Lead": ["manage_projects", "review", "export", "ai_chat"],
+    "QA Engineer": ["create_requirements", "generate", "submit_review", "ai_chat"],
+    Viewer: ["view_approved"],
+  };
+  return matrix[role];
+}
+
+export async function listWorkspaceRoles(workspaceId: string) {
+  const roles: WorkspaceRole[] = ["Owner", "Admin", "QA Lead", "QA Engineer", "Viewer"];
+  return roles.map((role) => ({
+    id: `${workspaceId}_${role.replace(/\s+/g, "_").toLowerCase()}`,
+    workspaceId,
+    role,
+    permissions: permissionsForRole(role),
+  }));
+}
+
+export async function updateWorkspaceRolePermissions(
+  workspaceId: string,
+  role: WorkspaceRole,
+  permissions: string[],
+) {
+  const db = await readDb();
+  let permission = db.workspacePermissions.find((item) => item.workspaceId === workspaceId && item.role === role);
+  if (!permission) {
+    permission = { id: createId("permission"), workspaceId, role, permissions };
+    db.workspacePermissions.push(permission);
+  } else {
+    permission.permissions = permissions;
+  }
+  addActivityLog(db, {
+    workspaceId,
+    action: "Role permissions updated",
+    resourceType: "Permission",
+    resourceId: permission.id,
+    newValue: { role, permissions },
+  });
+  await writeDb(db);
+  return permission;
 }
