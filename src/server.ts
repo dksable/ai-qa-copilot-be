@@ -14,7 +14,7 @@ import { pricingRouter } from "./pricingRoutes.js";
 import { projectRouter } from "./projectRoutes.js";
 import { reviewRouter } from "./reviewRoutes.js";
 import { workspaceRouter } from "./workspaceRoutes.js";
-import { saveGenerationHistory } from "./projectStore.js";
+import { assertAIUsageQuota, expireExpiredTrials, saveGenerationHistory } from "./projectStore.js";
 
 const app = express();
 const port = Number(process.env.PORT ?? 4000);
@@ -63,6 +63,13 @@ app.get("/health", (_request, response) => {
   response.json({ ok: true, service: "ai-qa-copilot-backend" });
 });
 
+void expireExpiredTrials();
+setInterval(() => {
+  void expireExpiredTrials().catch((error) => {
+    console.error("Trial expiry scheduler failed", error);
+  });
+}, 60 * 60 * 1000);
+
 app.use("/api", authRouter);
 app.use("/api", requireAuth);
 app.use("/api", projectRouter);
@@ -76,6 +83,10 @@ app.use("/api", workspaceRouter);
 app.post("/api/generate-testcases", async (request, response) => {
   try {
     const input = GenerateRequestSchema.parse(request.body);
+    if (input.projectId && input.moduleId) {
+      await assertAIUsageQuota({ projectId: input.projectId, moduleId: input.moduleId, type: "generation" });
+    }
+
     const testPlan = await generateTestPlanWithGroq({
       requirement: input.requirement,
       testType: input.testType,
@@ -89,6 +100,7 @@ app.post("/api/generate-testcases", async (request, response) => {
         requirementText: input.requirement,
         testType: input.testType,
         output: testPlan,
+        userId: request.userId,
       });
       response.json({ ...testPlan, savedRequirementId: saved?.requirement.id, savedHistoryId: saved?.history.id });
       return;
@@ -104,8 +116,15 @@ app.post("/api/generate-testcases", async (request, response) => {
       return;
     }
 
-    console.error(error);
-    response.status(500).json({
+    const statusCode =
+      typeof error === "object" &&
+      error !== null &&
+      "statusCode" in error &&
+      typeof (error as { statusCode?: unknown }).statusCode === "number"
+        ? (error as { statusCode: number }).statusCode
+        : 500;
+    if (statusCode >= 500) console.error(error);
+    response.status(statusCode).json({
       message: error instanceof Error ? error.message : "Unexpected backend error.",
     });
   }
@@ -120,8 +139,15 @@ app.use((error: unknown, _request: express.Request, response: express.Response, 
     response.status(400).json({ message: "Invalid request payload.", issues: error.issues });
     return;
   }
-  console.error(error);
-  response.status(500).json({
+  const statusCode =
+    typeof error === "object" &&
+    error !== null &&
+    "statusCode" in error &&
+    typeof (error as { statusCode?: unknown }).statusCode === "number"
+      ? (error as { statusCode: number }).statusCode
+      : 500;
+  if (statusCode >= 500) console.error(error);
+  response.status(statusCode).json({
     message: error instanceof Error ? error.message : "Unexpected backend error.",
   });
 });

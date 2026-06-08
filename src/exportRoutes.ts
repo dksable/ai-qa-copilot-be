@@ -3,6 +3,7 @@ import { z } from "zod";
 
 import { buildExcelExport, buildPdfExport, type ExportFormat } from "./exportService.js";
 import {
+  assertExportQuota,
   getHistoryById,
   listExportHistory,
   listHistory,
@@ -80,6 +81,7 @@ async function sendExport({
   exportType,
   projectId,
   requirementId,
+  userId,
 }: {
   response: Parameters<RequestHandler>[1];
   records: TestCaseHistoryRecord[];
@@ -87,6 +89,7 @@ async function sendExport({
   exportType: ExportType;
   projectId?: string;
   requirementId?: string;
+  userId?: string;
 }) {
   if (!records.length) {
     response.status(404).json({ message: "No history records found for export." });
@@ -104,6 +107,7 @@ async function sendExport({
     return;
   }
 
+  await assertExportQuota(records[0].workspaceId);
   const buffer = format === "excel" ? await buildExcelExport(records) : await buildPdfExport(records);
   const extension = format === "excel" ? "xlsx" : "pdf";
   const contentType =
@@ -116,6 +120,8 @@ async function sendExport({
   await recordExportHistory({
     exportType,
     exportFormat: format,
+    workspaceId: records[0].workspaceId,
+    userId,
     projectId,
     requirementId,
     totalRecords: records.length,
@@ -140,6 +146,7 @@ router.post("/export/excel", asyncRoute(async (request, response) => {
     exportType: inferExportType(input),
     projectId: input.projectId ?? input.filters?.projectId,
     requirementId: input.requirementId ?? input.filters?.requirementId,
+    userId: request.userId,
   });
 }));
 
@@ -152,6 +159,7 @@ router.post("/export/pdf", asyncRoute(async (request, response) => {
     exportType: inferExportType(input),
     projectId: input.projectId ?? input.filters?.projectId,
     requirementId: input.requirementId ?? input.filters?.requirementId,
+    userId: request.userId,
   });
 }));
 
@@ -163,6 +171,7 @@ router.post("/export/project", asyncRoute(async (request, response) => {
     format: input.format,
     exportType: "project",
     projectId: input.projectId,
+    userId: request.userId,
   });
 }));
 
@@ -174,6 +183,7 @@ router.post("/export/requirement", asyncRoute(async (request, response) => {
     format: input.format,
     exportType: "requirement",
     requirementId: input.requirementId,
+    userId: request.userId,
   });
 }));
 
@@ -196,6 +206,7 @@ router.post("/export/version", asyncRoute(async (request, response) => {
     exportType: historyIds.length > 1 ? "versions" : "version",
     projectId: records[0]?.projectId,
     requirementId: records[0]?.requirementId,
+    userId: request.userId,
   });
 }));
 

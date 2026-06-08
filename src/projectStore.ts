@@ -34,6 +34,7 @@ import type {
   TestCaseGenerationHistory,
   TestCaseHistoryCompare,
   TestCaseHistoryRecord,
+  Trial,
   UserRole,
   Workspace,
   WorkspaceInvite,
@@ -52,6 +53,7 @@ const demoEmail = "demo@aiqacopilot.local";
 const demoPasswordHash =
   "scrypt:demo-aiqa-salt-2026:5db2a0d89de2b4fc506a01ca83b2b01c92a884833ff230d54f8fcb6341b0584a1aa705d10c1e90bf6ff968174cf3ae9c956c75c786a1ed6c08b81dadadfb1856";
 const scrypt = promisify(scryptCallback);
+const trialDurationDays = 14;
 const planCatalog: Plan[] = [
   {
     id: "free",
@@ -68,6 +70,8 @@ const planCatalog: Plan[] = [
       requirementsPerMonth: 20,
       aiGenerationsPerMonth: 50,
       aiChatMessagesPerMonth: 50,
+      exportsPerMonth: 25,
+      storageMb: 100,
       exports: "PDF only",
       analytics: false,
       reviewWorkflow: false,
@@ -91,6 +95,8 @@ const planCatalog: Plan[] = [
       requirementsPerMonth: "unlimited",
       aiGenerationsPerMonth: 1000,
       aiChatMessagesPerMonth: 2000,
+      exportsPerMonth: 500,
+      storageMb: 5120,
       exports: "Excel + PDF",
       analytics: true,
       reviewWorkflow: true,
@@ -113,6 +119,8 @@ const planCatalog: Plan[] = [
       requirementsPerMonth: "unlimited",
       aiGenerationsPerMonth: "unlimited",
       aiChatMessagesPerMonth: "unlimited",
+      exportsPerMonth: "unlimited",
+      storageMb: "unlimited",
       exports: "Excel + PDF",
       analytics: true,
       reviewWorkflow: true,
@@ -222,9 +230,24 @@ const initialDb: ProjectDatabase = {
       planId: "pro",
       billingCycle: "monthly",
       status: "Trialing",
+      trialStartsAt: new Date().toISOString(),
       trialEndsAt: new Date(Date.now() + 14 * 86_400_000).toISOString(),
       currentPeriodStart: new Date().toISOString(),
       currentPeriodEnd: new Date(Date.now() + 30 * 86_400_000).toISOString(),
+      createdAt: new Date().toISOString(),
+      updatedAt: new Date().toISOString(),
+    },
+  ],
+  trials: [
+    {
+      id: "trial_default",
+      workspaceId: defaultWorkspaceId,
+      userId: defaultUserId,
+      subscriptionId: "subscription_default",
+      planId: "pro",
+      status: "Active",
+      startsAt: new Date().toISOString(),
+      endsAt: new Date(Date.now() + 14 * 86_400_000).toISOString(),
       createdAt: new Date().toISOString(),
       updatedAt: new Date().toISOString(),
     },
@@ -413,6 +436,7 @@ async function readDb(): Promise<ProjectDatabase> {
     ...db,
     plans: db.plans?.length ? db.plans : planCatalog,
     subscriptions: db.subscriptions?.length ? db.subscriptions : initialDb.subscriptions,
+    trials: db.trials ?? initialDb.trials,
     workspaces,
     workspaceMembers,
     workspaceInvites: db.workspaceInvites ?? [],
@@ -1018,13 +1042,18 @@ export async function createProject(input: {
   description: string;
   domain: ProjectDomain;
   status?: EntityStatus;
+  workspaceId?: string;
+  userId?: string;
 }) {
   const db = await readDb();
   const timestamp = now();
+  const workspaceId = input.workspaceId ?? primaryWorkspaceIdForUser(db, input.userId);
+  const usage = workspaceUsage(db, workspaceId);
+  assertLimit("Projects", usage.usage.projects.used, usage.usage.projects.limit);
   const project: Project = {
     id: createId("project"),
-    workspaceId: defaultWorkspaceId,
-    userId: defaultUserId,
+    workspaceId,
+    userId: input.userId ?? defaultUserId,
     name: input.name,
     description: input.description,
     domain: input.domain,
@@ -1079,11 +1108,12 @@ export async function createModule(input: {
   status?: EntityStatus;
 }) {
   const db = await readDb();
-  if (!db.projects.some((project) => project.id === input.projectId)) return null;
+  const project = db.projects.find((projectItem) => projectItem.id === input.projectId);
+  if (!project) return null;
   const timestamp = now();
   const moduleItem: ProjectModule = {
     id: createId("module"),
-    workspaceId: defaultWorkspaceId,
+    workspaceId: project.workspaceId,
     projectId: input.projectId,
     name: input.name,
     description: input.description,
@@ -1093,8 +1123,7 @@ export async function createModule(input: {
     updatedAt: timestamp,
   };
   db.modules.push(moduleItem);
-  const project = db.projects.find((projectItem) => projectItem.id === input.projectId);
-  if (project) project.updatedAt = timestamp;
+  project.updatedAt = timestamp;
   await writeDb(db);
   return moduleItem;
 }
@@ -1138,10 +1167,12 @@ export async function createRequirement(input: {
   const db = await readDb();
   const moduleItem = db.modules.find((item) => item.id === input.moduleId && item.projectId === input.projectId);
   if (!moduleItem) return null;
+  const usage = workspaceUsage(db, moduleItem.workspaceId);
+  assertLimit("Requirements", usage.usage.requirements.used, usage.usage.requirements.limit);
   const timestamp = now();
   const requirement: Requirement = {
     id: createId("requirement"),
-    workspaceId: defaultWorkspaceId,
+    workspaceId: moduleItem.workspaceId,
     projectId: input.projectId,
     moduleId: input.moduleId,
     title: input.title,
@@ -1193,6 +1224,7 @@ export async function saveGenerationHistory(input: {
   requirementText: string;
   testType: TestFocus;
   output: TestPlan;
+  userId?: string;
   generatedBy?: string;
   aiModelUsed?: string;
 }) {
@@ -1206,9 +1238,11 @@ export async function saveGenerationHistory(input: {
     : undefined;
 
   if (!requirement) {
+    const usage = workspaceUsage(db, moduleItem.workspaceId);
+    assertLimit("Requirements", usage.usage.requirements.used, usage.usage.requirements.limit);
     requirement = {
       id: createId("requirement"),
-      workspaceId: defaultWorkspaceId,
+      workspaceId: moduleItem.workspaceId,
       projectId: input.projectId,
       moduleId: input.moduleId,
       title: titleFromRequirement(input.requirementText),
@@ -1229,8 +1263,8 @@ export async function saveGenerationHistory(input: {
   const previousVersions = db.histories.filter((history) => history.requirementId === requirement.id);
   const history: TestCaseGenerationHistory = {
     id: createId("history"),
-    userId: defaultUserId,
-    workspaceId: defaultWorkspaceId,
+    userId: input.userId ?? defaultUserId,
+    workspaceId: moduleItem.workspaceId,
     projectId: input.projectId,
     moduleId: input.moduleId,
     requirementId: requirement.id,
@@ -1432,6 +1466,8 @@ export async function exportHistory(historyId: string, format: "csv" | "json" | 
 export async function recordExportHistory(input: {
   exportType: ExportType;
   exportFormat: ExportFormat;
+  workspaceId?: string;
+  userId?: string;
   projectId?: string;
   requirementId?: string;
   totalRecords: number;
@@ -1439,10 +1475,10 @@ export async function recordExportHistory(input: {
   const db = await readDb();
   const exportRecord: ExportHistory = {
     id: createId("export"),
-    userId: defaultUserId,
-    workspaceId: input.projectId
+    userId: input.userId ?? defaultUserId,
+    workspaceId: input.workspaceId ?? (input.projectId
       ? db.projects.find((project) => project.id === input.projectId)?.workspaceId ?? defaultWorkspaceId
-      : defaultWorkspaceId,
+      : defaultWorkspaceId),
     exportType: input.exportType,
     exportFormat: input.exportFormat,
     projectId: input.projectId,
@@ -1553,6 +1589,7 @@ export async function appendAIChatMessages(input: {
   historyVersionId?: string;
   userMessage: string;
   aiResponse: string;
+  userId?: string;
 }) {
   const db = await readDb();
   const timestamp = now();
@@ -1560,10 +1597,11 @@ export async function appendAIChatMessages(input: {
 
   if (!chat) {
     const requirement = db.requirements.find((item) => item.id === input.requirementId);
+    const project = db.projects.find((item) => item.id === input.projectId);
     chat = {
       id: createId("chat"),
-      userId: defaultUserId,
-      workspaceId: defaultWorkspaceId,
+      userId: input.userId ?? defaultUserId,
+      workspaceId: project?.workspaceId ?? defaultWorkspaceId,
       projectId: input.projectId,
       moduleId: input.moduleId,
       requirementId: input.requirementId,
@@ -1601,6 +1639,8 @@ export async function saveChatResponseAsNewVersion(input: { chatId: string; hist
   if (!sourceHistory) return null;
 
   const timestamp = now();
+  const usage = workspaceUsage(db, chat.workspaceId);
+  assertLimit("AI Generations", usage.usage.aiGenerations.used, usage.usage.aiGenerations.limit);
   const previousVersions = db.histories.filter((history) => history.requirementId === chat.requirementId);
   const output = {
     ...sourceHistory.output,
@@ -1614,7 +1654,7 @@ export async function saveChatResponseAsNewVersion(input: { chatId: string; hist
   const history: TestCaseGenerationHistory = {
     id: createId("history"),
     userId: defaultUserId,
-    workspaceId: defaultWorkspaceId,
+    workspaceId: chat.workspaceId,
     projectId: chat.projectId,
     moduleId: chat.moduleId,
     requirementId: chat.requirementId,
@@ -1778,34 +1818,284 @@ function ensureWorkspaceSubscription(db: ProjectDatabase, workspaceId: string) {
   let subscription = db.subscriptions.find((item) => item.workspaceId === workspaceId);
   if (!subscription) {
     const timestamp = now();
+    const trialEndsAt = new Date(Date.now() + trialDurationDays * 86_400_000).toISOString();
+    const workspace = db.workspaces.find((item) => item.id === workspaceId);
     subscription = {
       id: createId("subscription"),
       workspaceId,
-      planId: "free",
+      planId: "pro",
       billingCycle: "monthly",
       status: "Trialing",
-      trialEndsAt: new Date(Date.now() + 14 * 86_400_000).toISOString(),
+      trialStartsAt: timestamp,
+      trialEndsAt,
       currentPeriodStart: timestamp,
       currentPeriodEnd: new Date(Date.now() + 30 * 86_400_000).toISOString(),
       createdAt: timestamp,
       updatedAt: timestamp,
     };
     db.subscriptions.push(subscription);
+    db.trials.push({
+      id: createId("trial"),
+      workspaceId,
+      userId: workspace?.ownerId ?? defaultUserId,
+      subscriptionId: subscription.id,
+      planId: "pro",
+      status: "Active",
+      startsAt: timestamp,
+      endsAt: trialEndsAt,
+      createdAt: timestamp,
+      updatedAt: timestamp,
+    });
   }
   return subscription;
 }
 
+function expireTrials(db: ProjectDatabase) {
+  const timestamp = now();
+  let changed = false;
+  db.trials
+    .filter((trial) => trial.status === "Active" && trial.endsAt <= timestamp)
+    .forEach((trial) => {
+      trial.status = "Expired";
+      trial.updatedAt = timestamp;
+      const subscription = db.subscriptions.find((item) => item.id === trial.subscriptionId);
+      if (subscription?.status === "Trialing") {
+        const oldValue = { ...subscription };
+        subscription.planId = "free";
+        subscription.status = "Active";
+        subscription.trialStartsAt = trial.startsAt;
+        subscription.trialEndsAt = trial.endsAt;
+        subscription.currentPeriodStart = timestamp;
+        subscription.currentPeriodEnd = new Date(Date.now() + 30 * 86_400_000).toISOString();
+        subscription.updatedAt = timestamp;
+        addActivityLog(db, {
+          workspaceId: subscription.workspaceId,
+          action: "Trial expired",
+          resourceType: "Subscription",
+          resourceId: subscription.id,
+          oldValue,
+          newValue: subscription,
+        });
+      }
+      changed = true;
+    });
+  return changed;
+}
+
+function trialSummary(db: ProjectDatabase, workspaceId: string) {
+  const trial = db.trials
+    .filter((item) => item.workspaceId === workspaceId)
+    .sort((a, b) => b.createdAt.localeCompare(a.createdAt))[0];
+  if (!trial) return null;
+  const daysRemaining = Math.max(0, Math.ceil((new Date(trial.endsAt).getTime() - Date.now()) / 86_400_000));
+  return {
+    ...trial,
+    daysRemaining,
+    featuresAvailable: planWithDefaults(planCatalog.find((plan) => plan.id === trial.planId) ?? planCatalog[1]).features,
+  };
+}
+
+function createProTrialSubscription(db: ProjectDatabase, workspaceId: string, userId: string, timestamp = now()) {
+  const trialEndsAt = new Date(Date.now() + trialDurationDays * 86_400_000).toISOString();
+  const subscription: Subscription = {
+    id: createId("subscription"),
+    workspaceId,
+    planId: "pro",
+    billingCycle: "monthly",
+    status: "Trialing",
+    trialStartsAt: timestamp,
+    trialEndsAt,
+    currentPeriodStart: timestamp,
+    currentPeriodEnd: new Date(Date.now() + 30 * 86_400_000).toISOString(),
+    createdAt: timestamp,
+    updatedAt: timestamp,
+  };
+  const trial: Trial = {
+    id: createId("trial"),
+    workspaceId,
+    userId,
+    subscriptionId: subscription.id,
+    planId: "pro",
+    status: "Active",
+    startsAt: timestamp,
+    endsAt: trialEndsAt,
+    createdAt: timestamp,
+    updatedAt: timestamp,
+  };
+  db.subscriptions.push(subscription);
+  db.trials.push(trial);
+  addActivityLog(db, {
+    workspaceId,
+    actorId: userId,
+    action: "Pro trial started",
+    resourceType: "Trial",
+    resourceId: trial.id,
+    newValue: { startsAt: trial.startsAt, endsAt: trial.endsAt },
+  });
+  return { subscription, trial };
+}
+
+function limitError(resource: string, used: number, limit: number | "unlimited") {
+  const error = new Error(`Plan limit exceeded: ${resource} ${used} / ${limit} used. Upgrade to continue.`);
+  (error as Error & { statusCode?: number; code?: string }).statusCode = 403;
+  (error as Error & { statusCode?: number; code?: string }).code = "PLAN_LIMIT_EXCEEDED";
+  return error;
+}
+
+function monthStart() {
+  const date = new Date();
+  return new Date(Date.UTC(date.getUTCFullYear(), date.getUTCMonth(), 1)).toISOString();
+}
+
+function planWithDefaults(plan: Plan): Plan {
+  const catalogPlan = planCatalog.find((item) => item.id === plan.id) ?? planCatalog[0];
+  return {
+    ...catalogPlan,
+    ...plan,
+    limits: {
+      ...catalogPlan.limits,
+      ...plan.limits,
+    },
+  };
+}
+
+function workspaceStorageMb(db: ProjectDatabase, workspaceId: string) {
+  const payload = {
+    projects: db.projects.filter((project) => project.workspaceId === workspaceId),
+    modules: db.modules.filter((moduleItem) => moduleItem.workspaceId === workspaceId),
+    requirements: db.requirements.filter((requirement) => requirement.workspaceId === workspaceId),
+    histories: db.histories.filter((history) => history.workspaceId === workspaceId),
+    aiChats: db.aiChats.filter((chat) => chat.workspaceId === workspaceId),
+    exportHistories: db.exportHistories.filter((exportRecord) => exportRecord.workspaceId === workspaceId),
+    activityLogs: db.activityLogs.filter((log) => log.workspaceId === workspaceId),
+  };
+  return Number((Buffer.byteLength(JSON.stringify(payload), "utf8") / 1024 / 1024).toFixed(2));
+}
+
+function workspaceUsage(db: ProjectDatabase, workspaceId: string) {
+  const subscription = ensureWorkspaceSubscription(db, workspaceId);
+  const plan = planWithDefaults(
+    (db.plans?.length ? db.plans : planCatalog).find((item) => item.id === subscription.planId) ?? planCatalog[0],
+  );
+  const monthlyStart = monthStart();
+  const workspace = db.workspaces.find((item) => item.id === workspaceId);
+  const members = db.workspaceMembers.filter(
+    (member) => member.workspaceId === workspaceId && member.status === "Active",
+  ).length;
+  const pendingInvites = db.workspaceInvites.filter(
+    (invite) => invite.workspaceId === workspaceId && invite.status === "Pending",
+  ).length;
+  const projects = db.projects.filter((project) => project.workspaceId === workspaceId).length;
+  const requirements = db.requirements.filter(
+    (requirement) => requirement.workspaceId === workspaceId && requirement.createdAt >= monthlyStart,
+  ).length;
+  const aiGenerations = db.histories.filter(
+    (history) => history.workspaceId === workspaceId && history.generatedAt >= monthlyStart,
+  ).length;
+  const aiChatMessages = db.aiChats
+    .filter((chat) => chat.workspaceId === workspaceId)
+    .flatMap((chat) => chat.messages)
+    .filter((message) => message.role === "user" && message.createdAt >= monthlyStart).length;
+  const exports = db.exportHistories.filter(
+    (exportRecord) => exportRecord.workspaceId === workspaceId && exportRecord.createdAt >= monthlyStart,
+  ).length;
+  const workspaces = workspace ? db.workspaces.filter((item) => item.ownerId === workspace.ownerId).length : 0;
+  return {
+    plan,
+    subscription,
+    trial: trialSummary(db, workspaceId),
+    usage: {
+      workspaces: { used: workspaces, limit: plan.limits.workspaces },
+      members: { used: members + pendingInvites, limit: plan.limits.teamMembers },
+      projects: { used: projects, limit: plan.limits.projects },
+      requirements: { used: requirements, limit: plan.limits.requirementsPerMonth },
+      aiGenerations: { used: aiGenerations, limit: plan.limits.aiGenerationsPerMonth },
+      aiChatMessages: { used: aiChatMessages, limit: plan.limits.aiChatMessagesPerMonth },
+      exports: { used: exports, limit: plan.limits.exportsPerMonth },
+      activeUsers: { used: members, limit: plan.limits.teamMembers },
+      storage: { used: workspaceStorageMb(db, workspaceId), limit: plan.limits.storageMb },
+    },
+  };
+}
+
+function assertLimit(resource: string, used: number, limit: number | "unlimited") {
+  if (limit !== "unlimited" && used >= limit) throw limitError(resource, used, limit);
+}
+
+function primaryWorkspaceIdForUser(db: ProjectDatabase, userId?: string) {
+  return (
+    db.workspaceMembers.find((member) => member.userId === (userId ?? defaultUserId) && member.status === "Active")
+      ?.workspaceId ?? defaultWorkspaceId
+  );
+}
+
+function planForUser(db: ProjectDatabase, userId?: string) {
+  const workspaceId = db.workspaceMembers.find(
+    (member) => member.userId === (userId ?? defaultUserId) && member.status === "Active",
+  )?.workspaceId;
+  if (!workspaceId) return planCatalog[0];
+  return workspaceUsage(db, workspaceId).plan;
+}
+
+export async function getWorkspaceUsage(workspaceId: string) {
+  const db = await readDb();
+  expireTrials(db);
+  const result = workspaceUsage(db, workspaceId);
+  await writeDb(db);
+  return result;
+}
+
 export async function listPlans() {
   const db = await readDb();
-  return db.plans?.length ? db.plans : planCatalog;
+  return (db.plans?.length ? db.plans : planCatalog).map(planWithDefaults);
+}
+
+export async function assertAIUsageQuota(input: { projectId: string; moduleId?: string; type: "generation" | "chat" }) {
+  const db = await readDb();
+  const project = db.projects.find((item) => item.id === input.projectId);
+  if (!project) return null;
+  const usage = workspaceUsage(db, project.workspaceId);
+  if (input.type === "generation") {
+    assertLimit("AI Generations", usage.usage.aiGenerations.used, usage.usage.aiGenerations.limit);
+  } else {
+    assertLimit("AI Chat", usage.usage.aiChatMessages.used, usage.usage.aiChatMessages.limit);
+  }
+  await writeDb(db);
+  return usage;
+}
+
+export async function assertExportQuota(workspaceId: string) {
+  const db = await readDb();
+  const usage = workspaceUsage(db, workspaceId);
+  assertLimit("Exports", usage.usage.exports.used, usage.usage.exports.limit);
+  await writeDb(db);
+  return usage;
 }
 
 export async function getWorkspaceSubscription(workspaceId: string) {
   const db = await readDb();
+  expireTrials(db);
   const subscription = ensureWorkspaceSubscription(db, workspaceId);
-  const plan = (db.plans?.length ? db.plans : planCatalog).find((item) => item.id === subscription.planId) ?? planCatalog[0];
+  const plan = planWithDefaults(
+    (db.plans?.length ? db.plans : planCatalog).find((item) => item.id === subscription.planId) ?? planCatalog[0],
+  );
   await writeDb(db);
-  return { subscription, plan };
+  return { subscription, plan, trial: trialSummary(db, workspaceId) };
+}
+
+export async function getWorkspaceTrial(workspaceId: string) {
+  const db = await readDb();
+  expireTrials(db);
+  const summary = trialSummary(db, workspaceId);
+  await writeDb(db);
+  return summary;
+}
+
+export async function expireExpiredTrials() {
+  const db = await readDb();
+  const changed = expireTrials(db);
+  if (changed) await writeDb(db);
+  return { changed };
 }
 
 export async function updateWorkspaceSubscription(
@@ -1813,14 +2103,23 @@ export async function updateWorkspaceSubscription(
   input: { planId: PlanId; billingCycle?: BillingCycle },
 ) {
   const db = await readDb();
-  const plan = (db.plans?.length ? db.plans : planCatalog).find((item) => item.id === input.planId);
-  if (!plan) return null;
+  const rawPlan = (db.plans?.length ? db.plans : planCatalog).find((item) => item.id === input.planId);
+  if (!rawPlan) return null;
+  const plan = planWithDefaults(rawPlan);
   const subscription = ensureWorkspaceSubscription(db, workspaceId);
   const oldValue = { ...subscription };
+  const activeTrial = db.trials.find((trial) => trial.workspaceId === workspaceId && trial.status === "Active");
+  if (activeTrial && input.planId !== "free") {
+    activeTrial.status = "Converted";
+    activeTrial.updatedAt = now();
+  }
   subscription.planId = input.planId;
   subscription.billingCycle = input.billingCycle ?? subscription.billingCycle;
-  subscription.status = input.planId === "free" ? "Trialing" : "Active";
-  subscription.trialEndsAt = input.planId === "free" ? subscription.trialEndsAt ?? new Date(Date.now() + 14 * 86_400_000).toISOString() : undefined;
+  subscription.status = "Active";
+  if (input.planId !== "pro" || activeTrial?.status === "Converted") {
+    subscription.trialStartsAt = subscription.trialStartsAt;
+    subscription.trialEndsAt = subscription.trialEndsAt;
+  }
   subscription.currentPeriodStart = now();
   subscription.currentPeriodEnd = new Date(Date.now() + (subscription.billingCycle === "yearly" ? 365 : 30) * 86_400_000).toISOString();
   subscription.updatedAt = now();
@@ -1833,7 +2132,7 @@ export async function updateWorkspaceSubscription(
     newValue: subscription,
   });
   await writeDb(db);
-  return { subscription, plan };
+  return { subscription, plan, trial: trialSummary(db, workspaceId) };
 }
 
 async function hashPassword(password: string) {
@@ -1931,6 +2230,7 @@ export async function signupUser(input: {
   db.users.push(user);
   db.workspaces.push(workspace);
   db.workspaceMembers.push(member);
+  createProTrialSubscription(db, workspace.id, user.id, timestamp);
   addActivityLog(db, {
     workspaceId: workspace.id,
     actorId: user.id,
@@ -2002,6 +2302,7 @@ export async function googleLoginUser(input: { googleId?: string; email: string;
       joinedAt: timestamp,
       lastActiveAt: timestamp,
     });
+    createProTrialSubscription(db, workspace.id, user.id, timestamp);
   } else {
     user.googleId = input.googleId ?? user.googleId;
     user.avatar = input.avatar ?? user.avatar;
@@ -2080,15 +2381,20 @@ export async function getWorkspace(workspaceId: string) {
   };
 }
 
-export async function createWorkspace(input: { workspaceName: string; description: string; logo?: string }) {
+export async function createWorkspace(input: { workspaceName: string; description: string; logo?: string; ownerId?: string }) {
   const db = await readDb();
   const timestamp = now();
+  const ownerId = input.ownerId ?? defaultUserId;
+  const owner = db.users.find((user) => user.id === ownerId);
+  const plan = planForUser(db, ownerId);
+  const ownedWorkspaces = db.workspaces.filter((workspace) => workspace.ownerId === ownerId).length;
+  assertLimit("Workspaces", ownedWorkspaces, plan.limits.workspaces);
   const workspace: Workspace = {
     id: createId("workspace"),
     workspaceName: input.workspaceName,
     description: input.description,
     logo: input.logo,
-    ownerId: defaultUserId,
+    ownerId,
     status: "Active",
     createdAt: timestamp,
     updatedAt: timestamp,
@@ -2096,9 +2402,9 @@ export async function createWorkspace(input: { workspaceName: string; descriptio
   const member: WorkspaceMember = {
     id: createId("member"),
     workspaceId: workspace.id,
-    userId: defaultUserId,
-    name: "Current User",
-    email: "demo@aiqacopilot.local",
+    userId: ownerId,
+    name: owner?.name ?? "Current User",
+    email: owner?.email ?? "demo@aiqacopilot.local",
     role: "Owner",
     status: "Active",
     assignedProjects: [],
@@ -2240,10 +2546,13 @@ export async function createWorkspaceInvite(input: {
   role: WorkspaceRole;
   assignedProjects: WorkspaceInvite["assignedProjects"];
   message?: string;
+  invitedBy?: string;
 }) {
   const db = await readDb();
   const workspace = db.workspaces.find((item) => item.id === input.workspaceId);
   if (!workspace) return null;
+  const usage = workspaceUsage(db, input.workspaceId);
+  assertLimit("Members", usage.usage.members.used, usage.usage.members.limit);
   const invite: WorkspaceInvite = {
     id: createId("invite"),
     workspaceId: input.workspaceId,
@@ -2253,7 +2562,7 @@ export async function createWorkspaceInvite(input: {
     message: input.message,
     token: crypto.randomUUID(),
     status: "Pending",
-    invitedBy: defaultUserId,
+    invitedBy: input.invitedBy ?? defaultUserId,
     expiresAt: new Date(Date.now() + 7 * 24 * 60 * 60 * 1000).toISOString(),
     createdAt: now(),
   };
@@ -2279,6 +2588,11 @@ export async function acceptWorkspaceInvite(token: string) {
   const invite = db.workspaceInvites.find((item) => item.token === token);
   if (!invite) return null;
   if (invite.status !== "Pending") throw new Error("Invite is not pending.");
+  const usage = workspaceUsage(db, invite.workspaceId);
+  const activeMembers = db.workspaceMembers.filter(
+    (member) => member.workspaceId === invite.workspaceId && member.status === "Active",
+  ).length;
+  assertLimit("Members", activeMembers, usage.usage.members.limit);
   invite.status = "Accepted";
   const timestamp = now();
   const member: WorkspaceMember = {

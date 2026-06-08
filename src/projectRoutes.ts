@@ -46,6 +46,7 @@ const ProjectSchema = z.object({
   description: z.string().trim().min(1),
   domain: DomainSchema,
   status: StatusSchema.default("Active"),
+  workspaceId: z.string().optional(),
 });
 
 const ModuleSchema = z.object({
@@ -110,7 +111,7 @@ router.get("/projects", asyncRoute(async (_request, response) => {
 
 router.post("/projects", asyncRoute(async (request, response) => {
   const input = ProjectSchema.parse(request.body);
-  response.status(201).json(await createProject(input));
+  response.status(201).json(await createProject({ ...input, userId: request.userId }));
 }));
 
 router.get("/projects/:projectId", asyncRoute(async (request, response) => {
@@ -218,7 +219,7 @@ router.delete("/requirements/:requirementId", asyncRoute(async (request, respons
 
 router.post("/test-case-history", asyncRoute(async (request, response) => {
   const input = SaveHistorySchema.parse(request.body);
-  const saved = await saveGenerationHistory(input);
+  const saved = await saveGenerationHistory({ ...input, userId: request.userId });
   if (!saved) {
     response.status(404).json({ message: "Project module not found." });
     return;

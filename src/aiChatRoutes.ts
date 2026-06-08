@@ -4,6 +4,7 @@ import { z } from "zod";
 import { generateAIChatResponse } from "./aiChat.js";
 import {
   appendAIChatMessages,
+  assertAIUsageQuota,
   deleteAIChat,
   getAIChat,
   getAIChatContext,
@@ -40,8 +41,9 @@ router.post("/ai-chat/message", asyncRoute(async (request, response) => {
     return;
   }
 
+  await assertAIUsageQuota({ projectId: input.projectId, moduleId: input.moduleId, type: "chat" });
   const aiResponse = await generateAIChatResponse(context, input.userMessage);
-  const chat = await appendAIChatMessages({ ...input, aiResponse });
+  const chat = await appendAIChatMessages({ ...input, aiResponse, userId: request.userId });
   response.status(input.chatId ? 200 : 201).json(chat);
 }));
 

@@ -1,7 +1,14 @@
 import { type RequestHandler, Router } from "express";
 import { z } from "zod";
 
-import { getWorkspaceSubscription, listPlans, updateWorkspaceSubscription } from "./projectStore.js";
+import {
+  expireExpiredTrials,
+  getWorkspaceSubscription,
+  getWorkspaceTrial,
+  getWorkspaceUsage,
+  listPlans,
+  updateWorkspaceSubscription,
+} from "./projectStore.js";
 
 const router = Router();
 
@@ -26,6 +33,28 @@ router.get("/subscription/current", asyncRoute(async (request, response) => {
     return;
   }
   response.json(await getWorkspaceSubscription(workspaceId));
+}));
+
+router.get("/subscription/usage", asyncRoute(async (request, response) => {
+  const workspaceId = workspaceIdFrom(request);
+  if (!workspaceId) {
+    response.status(400).json({ message: "workspaceId is required." });
+    return;
+  }
+  response.json(await getWorkspaceUsage(workspaceId));
+}));
+
+router.get("/trial/current", asyncRoute(async (request, response) => {
+  const workspaceId = workspaceIdFrom(request);
+  if (!workspaceId) {
+    response.status(400).json({ message: "workspaceId is required." });
+    return;
+  }
+  response.json(await getWorkspaceTrial(workspaceId));
+}));
+
+router.post("/trial/expire", asyncRoute(async (_request, response) => {
+  response.json(await expireExpiredTrials());
 }));
 
 router.patch("/subscription/current", asyncRoute(async (request, response) => {

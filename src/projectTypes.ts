@@ -19,6 +19,7 @@ export type InviteStatus = "Pending" | "Accepted" | "Expired" | "Revoked";
 export type PlanId = "free" | "pro" | "enterprise";
 export type BillingCycle = "monthly" | "yearly";
 export type SubscriptionStatus = "Trialing" | "Active" | "Canceled" | "Past Due";
+export type TrialStatus = "Active" | "Expired" | "Converted";
 export type ReviewAction =
   | "Submitted for Review"
   | "Approved"
@@ -290,6 +291,8 @@ export interface Plan {
     requirementsPerMonth: number | "unlimited";
     aiGenerationsPerMonth: number | "unlimited";
     aiChatMessagesPerMonth: number | "unlimited";
+    exportsPerMonth: number | "unlimited";
+    storageMb: number | "unlimited";
     exports: string;
     analytics: boolean;
     reviewWorkflow: boolean;
@@ -305,9 +308,23 @@ export interface Subscription {
   planId: PlanId;
   billingCycle: BillingCycle;
   status: SubscriptionStatus;
+  trialStartsAt?: string;
   trialEndsAt?: string;
   currentPeriodStart: string;
   currentPeriodEnd: string;
+  createdAt: string;
+  updatedAt: string;
+}
+
+export interface Trial {
+  id: string;
+  workspaceId: string;
+  userId: string;
+  subscriptionId: string;
+  planId: PlanId;
+  status: TrialStatus;
+  startsAt: string;
+  endsAt: string;
   createdAt: string;
   updatedAt: string;
 }
@@ -330,6 +347,7 @@ export interface DashboardStats {
 export interface ProjectDatabase {
   plans: Plan[];
   subscriptions: Subscription[];
+  trials: Trial[];
   workspaces: Workspace[];
   workspaceMembers: WorkspaceMember[];
   workspaceInvites: WorkspaceInvite[];

@@ -49,7 +49,7 @@ router.post("/workspaces", asyncRoute(async (request, response) => {
     description: z.string().trim().default(""),
     logo: z.string().optional(),
   }).parse(request.body);
-  response.status(201).json(await createWorkspace(input));
+  response.status(201).json(await createWorkspace({ ...input, ownerId: request.userId }));
 }));
 
 router.get("/workspaces", asyncRoute(async (_request, response) => {
@@ -150,7 +150,7 @@ router.post("/workspaces/:id/invites", canManageWorkspace, asyncRoute(async (req
     assignedProjects: AssignedProjectsSchema,
     message: z.string().optional(),
   }).parse(request.body);
-  const invite = await createWorkspaceInvite({ workspaceId: param(request.params.id), ...input });
+  const invite = await createWorkspaceInvite({ workspaceId: param(request.params.id), ...input, invitedBy: request.userId });
   if (!invite) {
     response.status(404).json({ message: "Workspace not found." });
     return;
