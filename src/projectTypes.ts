@@ -27,6 +27,9 @@ export type ReviewAction =
   | "Rejected"
   | "Comment Added"
   | "Exported Approved Version";
+export type TestRunEnvironment = "QA" | "UAT" | "Staging" | "Production";
+export type TestRunStatus = "Not Started" | "In Progress" | "Completed";
+export type TestExecutionStatus = "Not Executed" | "Passed" | "Failed" | "Blocked" | "Skipped";
 
 export interface User {
   id: string;
@@ -262,6 +265,60 @@ export interface AIChatSummary {
   updatedAt: string;
 }
 
+export interface TestRun {
+  id: string;
+  workspaceId: string;
+  projectId: string;
+  moduleId: string;
+  requirementId?: string;
+  name: string;
+  environment: TestRunEnvironment;
+  buildVersion: string;
+  assignedTester: string;
+  status: TestRunStatus;
+  startDate: string;
+  endDate: string;
+  description: string;
+  createdBy: string;
+  createdAt: string;
+  updatedAt: string;
+}
+
+export interface TestExecution {
+  id: string;
+  testRunId: string;
+  testCaseId: string;
+  sourceHistoryId: string;
+  sourceCategory: "Positive" | "Negative" | "Edge";
+  title: string;
+  description: string;
+  expectedResult: string;
+  priority: Priority;
+  status: TestExecutionStatus;
+  actualResult: string;
+  comments: string;
+  screenshotUrl?: string;
+  bugId?: string;
+  executedBy?: string;
+  executedAt?: string;
+  createdAt: string;
+  updatedAt: string;
+}
+
+export interface TestExecutionHistory {
+  id: string;
+  testRunId: string;
+  testExecutionId: string;
+  testCaseId: string;
+  oldStatus: TestExecutionStatus;
+  newStatus: TestExecutionStatus;
+  updatedBy: string;
+  comment?: string;
+  actualResult?: string;
+  bugId?: string;
+  createdAt: string;
+}
+
 export interface ProjectSummary extends Project {
   totalModules: number;
   totalRequirements: number;
@@ -359,6 +416,9 @@ export interface ProjectDatabase {
   histories: TestCaseGenerationHistory[];
   exportHistories: ExportHistory[];
   aiChats: AIChat[];
+  testRuns: TestRun[];
+  testExecutions: TestExecution[];
+  testExecutionHistories: TestExecutionHistory[];
   reviewComments: ReviewComment[];
   reviewAuditTrail: ReviewAuditTrail[];
 }

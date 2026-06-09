@@ -13,6 +13,7 @@ import { requireAuth } from "./permissionMiddleware.js";
 import { pricingRouter } from "./pricingRoutes.js";
 import { projectRouter } from "./projectRoutes.js";
 import { reviewRouter } from "./reviewRoutes.js";
+import { testExecutionRouter } from "./testExecutionRoutes.js";
 import { workspaceRouter } from "./workspaceRoutes.js";
 import { assertAIUsageQuota, expireExpiredTrials, saveGenerationHistory } from "./projectStore.js";
 
@@ -78,6 +79,7 @@ app.use("/api", analyticsRouter);
 app.use("/api", exportRouter);
 app.use("/api", aiChatRouter);
 app.use("/api", reviewRouter);
+app.use("/api", testExecutionRouter);
 app.use("/api", workspaceRouter);
 
 app.post("/api/generate-testcases", async (request, response) => {

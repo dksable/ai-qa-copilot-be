@@ -31,9 +31,15 @@ import type {
   ReviewAction,
   ReviewComment,
   Subscription,
+  TestExecution,
+  TestExecutionHistory,
+  TestExecutionStatus,
   TestCaseGenerationHistory,
   TestCaseHistoryCompare,
   TestCaseHistoryRecord,
+  TestRun,
+  TestRunEnvironment,
+  TestRunStatus,
   Trial,
   UserRole,
   Workspace,
@@ -46,11 +52,10 @@ import type {
 const currentDir = path.dirname(fileURLToPath(import.meta.url));
 const dataDir = path.resolve(currentDir, "../data");
 const dbFile = path.join(dataDir, "db.json");
-const defaultUserId = "demo-user";
+const defaultUserId = "default-user";
 const defaultWorkspaceId = "workspace_default";
-const demoTimestamp = "2026-06-08T09:00:00.000Z";
-const demoEmail = "demo@aiqacopilot.local";
-const demoPasswordHash =
+const defaultUserEmail = "admin@aiqacopilot.local";
+const defaultPasswordHash =
   "scrypt:demo-aiqa-salt-2026:5db2a0d89de2b4fc506a01ca83b2b01c92a884833ff230d54f8fcb6341b0584a1aa705d10c1e90bf6ff968174cf3ae9c956c75c786a1ed6c08b81dadadfb1856";
 const scrypt = promisify(scryptCallback);
 const trialDurationDays = 14;
@@ -130,97 +135,6 @@ const planCatalog: Plan[] = [
     },
   },
 ];
-const demoTestPlan: TestPlan = {
-  summary: "Password reset coverage for email link expiry, secure password policy, and confirmation messaging.",
-  acceptanceCriteria: [
-    "User can request a password reset email from the login page.",
-    "Reset link expires after 30 minutes.",
-    "New password requires at least 8 characters, one number, and one symbol.",
-    "User receives a confirmation after reset succeeds.",
-  ],
-  positive: [
-    {
-      id: "POS-001",
-      title: "Registered user resets password with a valid email link",
-      steps: ["Open login page", "Request password reset", "Open valid reset link", "Submit compliant password"],
-      expected: "Password is updated and confirmation message is displayed.",
-      priority: "High",
-    },
-    {
-      id: "POS-002",
-      title: "Confirmation email is sent after successful reset",
-      steps: ["Complete password reset", "Check registered mailbox"],
-      expected: "User receives reset confirmation email.",
-      priority: "Medium",
-    },
-  ],
-  negative: [
-    {
-      id: "NEG-001",
-      title: "Expired reset link is rejected",
-      steps: ["Request reset link", "Wait longer than 30 minutes", "Open link"],
-      expected: "System blocks the link and prompts user to request a new one.",
-      priority: "High",
-    },
-    {
-      id: "NEG-002",
-      title: "Weak password is rejected",
-      steps: ["Open valid reset link", "Enter password without number or symbol"],
-      expected: "Validation error explains password policy.",
-      priority: "High",
-    },
-  ],
-  edge: [
-    {
-      id: "EDGE-001",
-      title: "Multiple reset requests invalidate older links",
-      steps: ["Request reset link twice", "Open the first link"],
-      expected: "Older link is rejected and latest link remains valid.",
-      priority: "Medium",
-    },
-  ],
-  testData: [
-    {
-      field: "email",
-      valid: ["customer@example.com"],
-      invalid: ["unknown@example.com", "bad-email"],
-      boundary: ["64-character local part email"],
-    },
-    {
-      field: "password",
-      valid: ["Secure@123"],
-      invalid: ["password", "short1!"],
-      boundary: ["8 characters exactly with number and symbol"],
-    },
-  ],
-  playwright: "import { test, expect } from '@playwright/test';\n\ntest('registered user can reset password', async ({ page }) => {\n  await page.goto('/login');\n  await page.getByRole('link', { name: /forgot password/i }).click();\n  await page.getByLabel(/email/i).fill('customer@example.com');\n  await page.getByRole('button', { name: /send reset link/i }).click();\n  await expect(page.getByText(/reset link sent/i)).toBeVisible();\n});",
-  regressionImpact: {
-    riskLevel: "Medium",
-    riskScore: 64,
-    impactedModules: ["Login", "Notifications"],
-    regressionAreas: [{ area: "Authentication recovery", priority: "High", coverage: "Functional and negative paths" }],
-    riskReason: "Password reset affects account access and security controls.",
-    qaFocusAreas: ["Expired links", "Weak password validation", "Email delivery"],
-    releaseRecommendation: {
-      status: "Release with Caution",
-      reason: "Add API and rate-limit coverage before high-volume release.",
-    },
-  },
-  coverageAnalysis: {
-    coverageScore: 86,
-    coverageStatus: "Good",
-    totalGeneratedTestCases: 5,
-    coveredAreas: ["Happy path reset", "Expired links", "Password policy", "Email confirmation"],
-    missingAreas: ["Rate limiting", "Localization"],
-    breakdown: [
-      { category: "Functional", status: "Covered", percentage: 92 },
-      { category: "Negative", status: "Covered", percentage: 84 },
-      { category: "Security", status: "Partial", percentage: 68 },
-    ],
-    recommendations: ["Add brute-force throttling scenarios.", "Add API-level reset token validation tests."],
-  },
-};
-
 const initialDb: ProjectDatabase = {
   plans: planCatalog,
   subscriptions: [
@@ -231,7 +145,7 @@ const initialDb: ProjectDatabase = {
       billingCycle: "monthly",
       status: "Trialing",
       trialStartsAt: new Date().toISOString(),
-      trialEndsAt: new Date(Date.now() + 14 * 86_400_000).toISOString(),
+      trialEndsAt: new Date(Date.now() + trialDurationDays * 86_400_000).toISOString(),
       currentPeriodStart: new Date().toISOString(),
       currentPeriodEnd: new Date(Date.now() + 30 * 86_400_000).toISOString(),
       createdAt: new Date().toISOString(),
@@ -247,7 +161,7 @@ const initialDb: ProjectDatabase = {
       planId: "pro",
       status: "Active",
       startsAt: new Date().toISOString(),
-      endsAt: new Date(Date.now() + 14 * 86_400_000).toISOString(),
+      endsAt: new Date(Date.now() + trialDurationDays * 86_400_000).toISOString(),
       createdAt: new Date().toISOString(),
       updatedAt: new Date().toISOString(),
     },
@@ -255,8 +169,8 @@ const initialDb: ProjectDatabase = {
   workspaces: [
     {
       id: defaultWorkspaceId,
-      workspaceName: "Successive Digital QA Team",
-      description: "Demo workspace with realistic QA assets for management walkthroughs.",
+      workspaceName: "AI QA Copilot Workspace",
+      description: "Default workspace for fresh demo setup.",
       ownerId: defaultUserId,
       status: "Active",
       createdAt: new Date().toISOString(),
@@ -268,8 +182,8 @@ const initialDb: ProjectDatabase = {
       id: "member_default",
       workspaceId: defaultWorkspaceId,
       userId: defaultUserId,
-      name: "Current User",
-      email: "demo@aiqacopilot.local",
+      name: "Demo Admin",
+      email: defaultUserEmail,
       role: "Owner",
       status: "Active",
       assignedProjects: [],
@@ -283,10 +197,10 @@ const initialDb: ProjectDatabase = {
   users: [
     {
       id: defaultUserId,
-      fullName: "Demo User",
-      name: "Demo User",
-      email: demoEmail,
-      passwordHash: demoPasswordHash,
+      fullName: "Demo Admin",
+      name: "Demo Admin",
+      email: defaultUserEmail,
+      passwordHash: defaultPasswordHash,
       authProvider: "email",
       role: "Owner",
       status: "Active",
@@ -295,113 +209,15 @@ const initialDb: ProjectDatabase = {
       updatedAt: new Date().toISOString(),
     },
   ],
-  projects: [
-    {
-      id: "project_demo_banking",
-      workspaceId: defaultWorkspaceId,
-      userId: defaultUserId,
-      name: "Banking Customer Portal",
-      description: "Customer login, registration, payment, and account servicing quality workspace.",
-      domain: "Banking",
-      status: "Active",
-      createdAt: demoTimestamp,
-      updatedAt: demoTimestamp,
-    },
-  ],
-  modules: [
-    {
-      id: "module_demo_login",
-      workspaceId: defaultWorkspaceId,
-      projectId: "project_demo_banking",
-      name: "Login & Access Recovery",
-      description: "Authentication, password reset, and user access recovery.",
-      priority: "Critical",
-      status: "Active",
-      createdAt: demoTimestamp,
-      updatedAt: demoTimestamp,
-    },
-    {
-      id: "module_demo_payment",
-      workspaceId: defaultWorkspaceId,
-      projectId: "project_demo_banking",
-      name: "Payment",
-      description: "Bill payment and confirmation flows.",
-      priority: "High",
-      status: "Active",
-      createdAt: demoTimestamp,
-      updatedAt: demoTimestamp,
-    },
-  ],
-  requirements: [
-    {
-      id: "requirement_demo_reset",
-      workspaceId: defaultWorkspaceId,
-      projectId: "project_demo_banking",
-      moduleId: "module_demo_login",
-      title: "Reset password via email",
-      description: "As a registered user, I want to reset my password via email so that I can regain access to my account.",
-      acceptanceCriteria: demoTestPlan.acceptanceCriteria.join("\n"),
-      priority: "High",
-      status: "Active",
-      createdAt: demoTimestamp,
-      updatedAt: demoTimestamp,
-    },
-  ],
-  histories: [
-    {
-      id: "history_demo_reset_v1",
-      userId: defaultUserId,
-      workspaceId: defaultWorkspaceId,
-      projectId: "project_demo_banking",
-      moduleId: "module_demo_login",
-      requirementId: "requirement_demo_reset",
-      version: 1,
-      requirementInput: "As a registered user, I want to reset my password via email so that I can regain access to my account.",
-      generatedAt: demoTimestamp,
-      generatedBy: "Demo User",
-      aiModelUsed: "llama-3.3-70b-versatile",
-      testType: "functional",
-      coverageScore: 86,
-      status: "Submitted for Review",
-      reviewStatus: "Submitted for Review",
-      submittedBy: "Demo User",
-      submittedAt: demoTimestamp,
-      isLocked: false,
-      updatedAt: demoTimestamp,
-      output: demoTestPlan,
-    },
-  ],
-  exportHistories: [
-    {
-      id: "export_demo_1",
-      userId: defaultUserId,
-      workspaceId: defaultWorkspaceId,
-      exportType: "version",
-      exportFormat: "pdf",
-      projectId: "project_demo_banking",
-      requirementId: "requirement_demo_reset",
-      totalRecords: 1,
-      createdAt: demoTimestamp,
-    },
-  ],
-  aiChats: [
-    {
-      id: "chat_demo_1",
-      userId: defaultUserId,
-      workspaceId: defaultWorkspaceId,
-      projectId: "project_demo_banking",
-      moduleId: "module_demo_login",
-      requirementId: "requirement_demo_reset",
-      historyVersionId: "history_demo_reset_v1",
-      title: "Improve password reset coverage",
-      messages: [
-        { role: "user", content: "What security test cases are missing?", createdAt: demoTimestamp },
-        { role: "assistant", content: "Add rate limiting, token reuse, token tampering, and account enumeration checks before approval.", createdAt: demoTimestamp },
-      ],
-      createdAt: demoTimestamp,
-      updatedAt: demoTimestamp,
-    },
-  ],
+  projects: [],
+  modules: [],
+  requirements: [],
+  histories: [],
+  exportHistories: [],
+  aiChats: [],
+  testRuns: [],
+  testExecutions: [],
+  testExecutionHistories: [],
   reviewComments: [],
   reviewAuditTrail: [],
 };
@@ -414,6 +230,12 @@ function now() {
 
 function createId(prefix: string) {
   return `${prefix}_${crypto.randomUUID()}`;
+}
+
+function httpError(message: string, statusCode: number) {
+  const error = new Error(message);
+  (error as Error & { statusCode?: number }).statusCode = statusCode;
+  return error;
 }
 
 async function ensureDbFile() {
@@ -444,6 +266,9 @@ async function readDb(): Promise<ProjectDatabase> {
     activityLogs: db.activityLogs ?? [],
     exportHistories: db.exportHistories ?? [],
     aiChats: (db.aiChats ?? []).map(normalizeChat),
+    testRuns: db.testRuns ?? [],
+    testExecutions: db.testExecutions ?? [],
+    testExecutionHistories: db.testExecutionHistories ?? [],
     reviewComments: db.reviewComments ?? [],
     reviewAuditTrail: db.reviewAuditTrail ?? [],
     users: (db.users ?? initialDb.users).map(normalizeUser),
@@ -495,12 +320,11 @@ function normalizeChat(chat: AIChat): AIChat {
 
 function normalizeUser(user: ProjectDatabase["users"][number]): ProjectDatabase["users"][number] {
   const timestamp = user.createdAt ?? now();
-  const isDemoUser = user.id === defaultUserId || user.email?.toLowerCase() === demoEmail;
   return {
     ...user,
     fullName: user.fullName ?? user.name ?? "Current User",
     name: user.name ?? user.fullName ?? "Current User",
-    passwordHash: user.passwordHash ?? (isDemoUser ? demoPasswordHash : undefined),
+    passwordHash: user.passwordHash,
     authProvider: "email",
     role: user.role ?? "Owner",
     status: user.status ?? "Active",
@@ -526,6 +350,107 @@ function enrichHistory(db: ProjectDatabase, history: TestCaseGenerationHistory):
 
 function allCases(plan: TestPlan) {
   return [...plan.positive, ...plan.negative, ...plan.edge];
+}
+
+function executionCounts(executions: TestExecution[]) {
+  const counts: Record<TestExecutionStatus, number> = {
+    "Not Executed": 0,
+    Passed: 0,
+    Failed: 0,
+    Blocked: 0,
+    Skipped: 0,
+  };
+  executions.forEach((execution) => {
+    counts[execution.status] += 1;
+  });
+  const total = executions.length;
+  const completed = total - counts["Not Executed"];
+  return {
+    total,
+    passed: counts.Passed,
+    failed: counts.Failed,
+    blocked: counts.Blocked,
+    skipped: counts.Skipped,
+    notExecuted: counts["Not Executed"],
+    passRate: total ? Math.round((counts.Passed / total) * 100) : 0,
+    progress: total ? Math.round((completed / total) * 100) : 0,
+  };
+}
+
+function testRunStatusFromExecutions(executions: TestExecution[]): TestRunStatus {
+  const counts = executionCounts(executions);
+  if (!counts.total || counts.notExecuted === counts.total) return "Not Started";
+  if (counts.notExecuted === 0) return "Completed";
+  return "In Progress";
+}
+
+function summarizeTestRun(db: ProjectDatabase, run: TestRun) {
+  const executions = db.testExecutions.filter((execution) => execution.testRunId === run.id);
+  const counts = executionCounts(executions);
+  const project = db.projects.find((item) => item.id === run.projectId);
+  const moduleItem = db.modules.find((item) => item.id === run.moduleId);
+  const requirement = run.requirementId
+    ? db.requirements.find((item) => item.id === run.requirementId)
+    : undefined;
+  return {
+    ...run,
+    projectName: project?.name ?? "Unknown project",
+    moduleName: moduleItem?.name ?? "Unknown module",
+    requirementTitle: requirement?.title,
+    totalTestCases: counts.total,
+    passed: counts.passed,
+    failed: counts.failed,
+    blocked: counts.blocked,
+    skipped: counts.skipped,
+    notExecuted: counts.notExecuted,
+    passRate: counts.passRate,
+    progress: counts.progress,
+  };
+}
+
+function approvedHistoriesForRun(
+  db: ProjectDatabase,
+  input: { projectId: string; moduleId: string; requirementId?: string; historyIds?: string[] },
+) {
+  const selected = input.historyIds?.length
+    ? db.histories.filter((history) => input.historyIds?.includes(history.id))
+    : db.histories.filter(
+        (history) =>
+          history.projectId === input.projectId &&
+          history.moduleId === input.moduleId &&
+          (!input.requirementId || history.requirementId === input.requirementId),
+      );
+  return selected.filter((history) => history.reviewStatus === "Approved");
+}
+
+function executionRowsFromHistory(history: TestCaseGenerationHistory, timestamp: string) {
+  const rows: TestExecution[] = [];
+  const groups = [
+    { category: "Positive" as const, cases: history.output.positive },
+    { category: "Negative" as const, cases: history.output.negative },
+    { category: "Edge" as const, cases: history.output.edge },
+  ];
+  groups.forEach(({ category, cases }) => {
+    cases.forEach((testCase) => {
+      rows.push({
+        id: createId("execution"),
+        testRunId: "",
+        testCaseId: `${history.id}:${testCase.id}`,
+        sourceHistoryId: history.id,
+        sourceCategory: category,
+        title: testCase.title,
+        description: testCase.steps.join("\n"),
+        expectedResult: testCase.expected,
+        priority: testCase.priority,
+        status: "Not Executed",
+        actualResult: "",
+        comments: "",
+        createdAt: timestamp,
+        updatedAt: timestamp,
+      });
+    });
+  });
+  return rows;
 }
 
 function csvCell(value: unknown) {
@@ -1089,6 +1014,10 @@ export async function deleteProject(projectId: string) {
   db.modules = db.modules.filter((moduleItem) => moduleItem.projectId !== projectId);
   db.requirements = db.requirements.filter((requirement) => requirement.projectId !== projectId);
   db.histories = db.histories.filter((history) => history.projectId !== projectId);
+  const removedRunIds = db.testRuns.filter((run) => run.projectId === projectId).map((run) => run.id);
+  db.testRuns = db.testRuns.filter((run) => run.projectId !== projectId);
+  db.testExecutions = db.testExecutions.filter((execution) => !removedRunIds.includes(execution.testRunId));
+  db.testExecutionHistories = db.testExecutionHistories.filter((history) => !removedRunIds.includes(history.testRunId));
   await writeDb(db);
   return true;
 }
@@ -1144,6 +1073,10 @@ export async function deleteModule(moduleId: string) {
   db.modules = db.modules.filter((moduleItem) => moduleItem.id !== moduleId);
   db.requirements = db.requirements.filter((requirement) => requirement.moduleId !== moduleId);
   db.histories = db.histories.filter((history) => history.moduleId !== moduleId);
+  const removedRunIds = db.testRuns.filter((run) => run.moduleId === moduleId).map((run) => run.id);
+  db.testRuns = db.testRuns.filter((run) => run.moduleId !== moduleId);
+  db.testExecutions = db.testExecutions.filter((execution) => !removedRunIds.includes(execution.testRunId));
+  db.testExecutionHistories = db.testExecutionHistories.filter((history) => !removedRunIds.includes(history.testRunId));
   await writeDb(db);
   return true;
 }
@@ -1209,6 +1142,10 @@ export async function deleteRequirement(requirementId: string) {
   if (!exists) return false;
   db.requirements = db.requirements.filter((requirement) => requirement.id !== requirementId);
   db.histories = db.histories.filter((history) => history.requirementId !== requirementId);
+  const removedRunIds = db.testRuns.filter((run) => run.requirementId === requirementId).map((run) => run.id);
+  db.testRuns = db.testRuns.filter((run) => run.requirementId !== requirementId);
+  db.testExecutions = db.testExecutions.filter((execution) => !removedRunIds.includes(execution.testRunId));
+  db.testExecutionHistories = db.testExecutionHistories.filter((history) => !removedRunIds.includes(history.testRunId));
   await writeDb(db);
   return true;
 }
@@ -1377,6 +1314,13 @@ export async function deleteHistory(historyId: string) {
   const exists = db.histories.some((history) => history.id === historyId);
   if (!exists) return false;
   db.histories = db.histories.filter((history) => history.id !== historyId);
+  const removedExecutionIds = db.testExecutions
+    .filter((execution) => execution.sourceHistoryId === historyId)
+    .map((execution) => execution.id);
+  db.testExecutions = db.testExecutions.filter((execution) => execution.sourceHistoryId !== historyId);
+  db.testExecutionHistories = db.testExecutionHistories.filter(
+    (history) => !removedExecutionIds.includes(history.testExecutionId),
+  );
   await writeDb(db);
   return true;
 }
@@ -1501,6 +1445,300 @@ export async function recordExportHistory(input: {
 export async function listExportHistory() {
   const db = await readDb();
   return db.exportHistories.sort((a, b) => b.createdAt.localeCompare(a.createdAt));
+}
+
+export async function listApprovedTestCaseVersions(filters: {
+  projectId?: string;
+  moduleId?: string;
+  requirementId?: string;
+}) {
+  const db = await readDb();
+  return db.histories
+    .filter((history) => history.reviewStatus === "Approved")
+    .filter((history) => !filters.projectId || history.projectId === filters.projectId)
+    .filter((history) => !filters.moduleId || history.moduleId === filters.moduleId)
+    .filter((history) => !filters.requirementId || history.requirementId === filters.requirementId)
+    .map((history) => ({
+      ...enrichHistory(db, history),
+      totalTestCases: countPlanTestCases(history.output),
+    }))
+    .sort((a, b) => b.generatedAt.localeCompare(a.generatedAt));
+}
+
+export async function createTestRun(input: {
+  name: string;
+  projectId: string;
+  moduleId: string;
+  requirementId?: string;
+  environment: TestRunEnvironment;
+  buildVersion: string;
+  assignedTester?: string;
+  startDate: string;
+  endDate: string;
+  description: string;
+  historyIds?: string[];
+  createdBy?: string;
+}) {
+  const db = await readDb();
+  const project = db.projects.find((item) => item.id === input.projectId);
+  const moduleItem = db.modules.find((item) => item.id === input.moduleId && item.projectId === input.projectId);
+  if (!project || !moduleItem) return null;
+
+  const histories = approvedHistoriesForRun(db, input);
+  if (!histories.length) {
+    const error = new Error("Select at least one approved test case version for this test run.");
+    (error as Error & { statusCode?: number }).statusCode = 400;
+    throw error;
+  }
+
+  const timestamp = now();
+  const run: TestRun = {
+    id: createId("run"),
+    workspaceId: project.workspaceId,
+    projectId: input.projectId,
+    moduleId: input.moduleId,
+    requirementId: input.requirementId || undefined,
+    name: input.name,
+    environment: input.environment,
+    buildVersion: input.buildVersion,
+    assignedTester: input.assignedTester?.trim() || input.createdBy || "Unassigned",
+    status: "Not Started",
+    startDate: input.startDate,
+    endDate: input.endDate,
+    description: input.description,
+    createdBy: input.createdBy ?? "Current User",
+    createdAt: timestamp,
+    updatedAt: timestamp,
+  };
+  const executions = histories.flatMap((history) => executionRowsFromHistory(history, timestamp));
+  executions.forEach((execution) => {
+    execution.testRunId = run.id;
+  });
+  db.testRuns.push(run);
+  db.testExecutions.push(...executions);
+  addActivityLog(db, {
+    workspaceId: run.workspaceId,
+    action: "Test run created",
+    resourceType: "TestRun",
+    resourceId: run.id,
+    newValue: { name: run.name, totalTestCases: executions.length },
+  });
+  await writeDb(db);
+  return summarizeTestRun(db, run);
+}
+
+export async function listTestRuns(filters: { projectId?: string; status?: TestRunStatus } = {}) {
+  const db = await readDb();
+  return db.testRuns
+    .map((run) => summarizeTestRun(db, run))
+    .filter((run) => !filters.projectId || run.projectId === filters.projectId)
+    .filter((run) => !filters.status || run.status === filters.status)
+    .sort((a, b) => b.updatedAt.localeCompare(a.updatedAt));
+}
+
+export async function getTestRun(testRunId: string) {
+  const db = await readDb();
+  const run = db.testRuns.find((item) => item.id === testRunId);
+  if (!run) return null;
+  return {
+    ...summarizeTestRun(db, run),
+    executions: db.testExecutions.filter((execution) => execution.testRunId === testRunId),
+  };
+}
+
+export async function updateTestRun(
+  testRunId: string,
+  input: Partial<Pick<TestRun, "name" | "environment" | "buildVersion" | "assignedTester" | "status" | "startDate" | "endDate" | "description">>,
+) {
+  const db = await readDb();
+  const run = db.testRuns.find((item) => item.id === testRunId);
+  if (!run) return null;
+  Object.assign(run, input, { updatedAt: now() });
+  await writeDb(db);
+  return summarizeTestRun(db, run);
+}
+
+export async function deleteTestRun(testRunId: string) {
+  const db = await readDb();
+  const exists = db.testRuns.some((run) => run.id === testRunId);
+  if (!exists) return false;
+  db.testRuns = db.testRuns.filter((run) => run.id !== testRunId);
+  db.testExecutions = db.testExecutions.filter((execution) => execution.testRunId !== testRunId);
+  db.testExecutionHistories = db.testExecutionHistories.filter((history) => history.testRunId !== testRunId);
+  await writeDb(db);
+  return true;
+}
+
+export async function listTestExecutions(testRunId: string) {
+  const db = await readDb();
+  return db.testExecutions
+    .filter((execution) => execution.testRunId === testRunId)
+    .sort((a, b) => a.testCaseId.localeCompare(b.testCaseId));
+}
+
+export async function updateTestExecutionStatus(
+  executionId: string,
+  input: {
+    status: TestExecutionStatus;
+    actualResult?: string;
+    comments?: string;
+    bugId?: string;
+    screenshotUrl?: string;
+    updatedBy?: string;
+  },
+) {
+  const db = await readDb();
+  const execution = db.testExecutions.find((item) => item.id === executionId);
+  if (!execution) return null;
+  if (input.status === "Failed" && (!input.actualResult?.trim() || !input.comments?.trim())) {
+    const error = new Error("Actual result and comments are required for failed executions.");
+    (error as Error & { statusCode?: number }).statusCode = 400;
+    throw error;
+  }
+  const timestamp = now();
+  const oldStatus = execution.status;
+  execution.status = input.status;
+  execution.actualResult = input.actualResult ?? execution.actualResult;
+  execution.comments = input.comments ?? execution.comments;
+  execution.bugId = input.bugId ?? execution.bugId;
+  execution.screenshotUrl = input.screenshotUrl ?? execution.screenshotUrl;
+  execution.executedBy = input.updatedBy ?? execution.executedBy ?? "Current User";
+  execution.executedAt = timestamp;
+  execution.updatedAt = timestamp;
+  db.testExecutionHistories.push({
+    id: createId("execution_history"),
+    testRunId: execution.testRunId,
+    testExecutionId: execution.id,
+    testCaseId: execution.testCaseId,
+    oldStatus,
+    newStatus: execution.status,
+    updatedBy: input.updatedBy ?? "Current User",
+    comment: input.comments,
+    actualResult: input.actualResult,
+    bugId: input.bugId,
+    createdAt: timestamp,
+  });
+  const run = db.testRuns.find((item) => item.id === execution.testRunId);
+  if (run) {
+    run.status = testRunStatusFromExecutions(db.testExecutions.filter((item) => item.testRunId === run.id));
+    run.updatedAt = timestamp;
+  }
+  await writeDb(db);
+  return execution;
+}
+
+export async function updateTestExecutionDetails(
+  executionId: string,
+  input: Partial<Pick<TestExecution, "actualResult" | "comments" | "bugId" | "screenshotUrl">>,
+) {
+  const db = await readDb();
+  const execution = db.testExecutions.find((item) => item.id === executionId);
+  if (!execution) return null;
+  Object.assign(execution, input, { updatedAt: now() });
+  await writeDb(db);
+  return execution;
+}
+
+export async function getTestExecutionHistory(executionId: string) {
+  const db = await readDb();
+  return db.testExecutionHistories
+    .filter((history) => history.testExecutionId === executionId)
+    .sort((a, b) => b.createdAt.localeCompare(a.createdAt));
+}
+
+export async function getTestExecutionDashboard() {
+  const db = await readDb();
+  const runs = db.testRuns.map((run) => summarizeTestRun(db, run));
+  const executions = db.testExecutions;
+  const counts = executionCounts(executions);
+  const projectProgress = db.projects.map((project) => {
+    const projectRuns = runs.filter((run) => run.projectId === project.id);
+    return {
+      projectId: project.id,
+      projectName: project.name,
+      progress: projectRuns.length ? Math.round(projectRuns.reduce((total, run) => total + run.progress, 0) / projectRuns.length) : 0,
+    };
+  });
+  const trendMap = new Map<string, number>();
+  db.testExecutionHistories.forEach((history) => increment(trendMap, dateKey(history.createdAt)));
+  const testerMap = new Map<string, { total: number; passed: number; failed: number }>();
+  executions.forEach((execution) => {
+    const tester = execution.executedBy || "Unassigned";
+    const current = testerMap.get(tester) ?? { total: 0, passed: 0, failed: 0 };
+    current.total += execution.status === "Not Executed" ? 0 : 1;
+    current.passed += execution.status === "Passed" ? 1 : 0;
+    current.failed += execution.status === "Failed" ? 1 : 0;
+    testerMap.set(tester, current);
+  });
+  return {
+    totalTestRuns: runs.length,
+    activeTestRuns: runs.filter((run) => run.status === "In Progress").length,
+    completedTestRuns: runs.filter((run) => run.status === "Completed").length,
+    passRate: counts.passRate,
+    failedTestCases: counts.failed,
+    blockedTestCases: counts.blocked,
+    executionProgressByProject: projectProgress,
+    passFailChart: [
+      { name: "Passed", value: counts.passed },
+      { name: "Failed", value: counts.failed },
+      { name: "Blocked", value: counts.blocked },
+      { name: "Skipped", value: counts.skipped },
+      { name: "Not Executed", value: counts.notExecuted },
+    ],
+    dailyExecutionTrend: toSeries(trendMap, "executions"),
+    testerSummary: [...testerMap.entries()].map(([tester, value]) => ({ tester, ...value })),
+  };
+}
+
+export async function getTestExecutionReports() {
+  const runs = await listTestRuns();
+  return runs;
+}
+
+export async function exportTestRunReport(testRunId: string, format: "pdf" | "excel") {
+  const detail = await getTestRun(testRunId);
+  if (!detail) return null;
+  const rows = [
+    ["Test Run", detail.name],
+    ["Project", detail.projectName],
+    ["Environment", detail.environment],
+    ["Build Version", detail.buildVersion],
+    ["Tester", detail.assignedTester],
+    ["Total Test Cases", detail.totalTestCases],
+    ["Passed", detail.passed],
+    ["Failed", detail.failed],
+    ["Blocked", detail.blocked],
+    ["Skipped", detail.skipped],
+    ["Not Executed", detail.notExecuted],
+    ["Pass Rate", `${detail.passRate}%`],
+  ];
+  const executionRows = detail.executions.map((execution) => [
+    execution.testCaseId,
+    execution.title,
+    execution.priority,
+    execution.status,
+    execution.actualResult,
+    execution.comments,
+    execution.bugId ?? "",
+  ]);
+  if (format === "excel") {
+    return {
+      contentType: "application/vnd.ms-excel",
+      filename: `${detail.name.replace(/\W+/g, "-").toLowerCase()}-execution-report.xls`,
+      body: [...rows, [], ["Test Case ID", "Title", "Priority", "Status", "Actual Result", "Comments", "Bug ID"], ...executionRows]
+        .map((row) => row.map(csvCell).join(","))
+        .join("\n"),
+    };
+  }
+  const summaryHtml = rows.map(([label, value]) => `<tr><th>${label}</th><td>${value}</td></tr>`).join("");
+  const detailsHtml = executionRows
+    .map((row) => `<tr>${row.map((value) => `<td>${String(value).replace(/[<>&]/g, (char) => ({ "<": "&lt;", ">": "&gt;", "&": "&amp;" })[char] ?? char)}</td>`).join("")}</tr>`)
+    .join("");
+  return {
+    contentType: "text/html",
+    filename: `${detail.name.replace(/\W+/g, "-").toLowerCase()}-execution-report.html`,
+    body: `<!doctype html><html><head><meta charset="utf-8"><title>Execution Report</title><style>body{font-family:Arial,sans-serif;padding:24px}table{border-collapse:collapse;width:100%;margin:16px 0}th,td{border:1px solid #ddd;padding:8px;text-align:left;vertical-align:top}th{background:#f5f5f5}</style></head><body><h1>Execution Report</h1><table>${summaryHtml}</table><h2>Execution Details</h2><table><thead><tr><th>Test Case ID</th><th>Title</th><th>Priority</th><th>Status</th><th>Actual Result</th><th>Comments</th><th>Bug ID</th></tr></thead><tbody>${detailsHtml}</tbody></table></body></html>`,
+  };
 }
 
 function summarizeChat(db: ProjectDatabase, chat: AIChat): AIChatSummary {
@@ -2190,7 +2428,7 @@ export async function signupUser(input: {
   const db = await readDb();
   const email = input.email.trim().toLowerCase();
   if (db.users.some((user) => user.email.toLowerCase() === email)) {
-    throw new Error("An account already exists for this email.");
+    throw httpError("An account already exists for this email.", 409);
   }
   const timestamp = now();
   const user = {
@@ -2248,7 +2486,7 @@ export async function loginUser(emailInput: string, password: string) {
   const email = emailInput.trim().toLowerCase();
   const user = db.users.find((item) => item.email.toLowerCase() === email && item.authProvider === "email");
   if (!user || user.status !== "Active" || !(await verifyPassword(password, user.passwordHash))) {
-    throw new Error("Invalid email or password.");
+    throw httpError("Invalid email or password.", 401);
   }
   user.lastLoginAt = now();
   user.updatedAt = user.lastLoginAt;
@@ -2349,7 +2587,7 @@ export async function createWorkspace(input: { workspaceName: string; descriptio
     workspaceId: workspace.id,
     userId: ownerId,
     name: owner?.name ?? "Current User",
-    email: owner?.email ?? "demo@aiqacopilot.local",
+    email: owner?.email ?? "owner@aiqacopilot.local",
     role: "Owner",
     status: "Active",
     assignedProjects: [],
