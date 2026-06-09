@@ -34,9 +34,8 @@ export interface User {
   name: string;
   email: string;
   passwordHash?: string;
-  googleId?: string;
   avatar?: string;
-  authProvider: "email" | "google";
+  authProvider: "email";
   role: WorkspaceRole;
   status: "Active" | "Inactive" | "Suspended";
   emailVerified: boolean;

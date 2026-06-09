@@ -501,7 +501,7 @@ function normalizeUser(user: ProjectDatabase["users"][number]): ProjectDatabase[
     fullName: user.fullName ?? user.name ?? "Current User",
     name: user.name ?? user.fullName ?? "Current User",
     passwordHash: user.passwordHash ?? (isDemoUser ? demoPasswordHash : undefined),
-    authProvider: user.authProvider ?? "email",
+    authProvider: "email",
     role: user.role ?? "Owner",
     status: user.status ?? "Active",
     emailVerified: user.emailVerified ?? true,
@@ -2254,61 +2254,6 @@ export async function loginUser(emailInput: string, password: string) {
   user.updatedAt = user.lastLoginAt;
   const member = db.workspaceMembers.find((item) => item.userId === user.id && item.status === "Active");
   if (member) member.lastActiveAt = user.lastLoginAt;
-  await writeDb(db);
-  return authContext(db, user.id)!;
-}
-
-export async function googleLoginUser(input: { googleId?: string; email: string; fullName: string; avatar?: string }) {
-  const db = await readDb();
-  const email = input.email.trim().toLowerCase();
-  const timestamp = now();
-  let user = db.users.find((item) => item.email.toLowerCase() === email);
-  if (!user) {
-    user = {
-      id: createId("user"),
-      fullName: input.fullName,
-      name: input.fullName,
-      email,
-      googleId: input.googleId,
-      avatar: input.avatar,
-      authProvider: "google",
-      role: "Owner",
-      status: "Active",
-      emailVerified: true,
-      lastLoginAt: timestamp,
-      createdAt: timestamp,
-      updatedAt: timestamp,
-    };
-    const workspace: Workspace = {
-      id: createId("workspace"),
-      workspaceName: defaultWorkspaceName(user.fullName),
-      description: "Default workspace created from Google login.",
-      ownerId: user.id,
-      status: "Active",
-      createdAt: timestamp,
-      updatedAt: timestamp,
-    };
-    db.users.push(user);
-    db.workspaces.push(workspace);
-    db.workspaceMembers.push({
-      id: createId("member"),
-      workspaceId: workspace.id,
-      userId: user.id,
-      name: user.fullName,
-      email: user.email,
-      role: "Owner",
-      status: "Active",
-      assignedProjects: [],
-      joinedAt: timestamp,
-      lastActiveAt: timestamp,
-    });
-    createProTrialSubscription(db, workspace.id, user.id, timestamp);
-  } else {
-    user.googleId = input.googleId ?? user.googleId;
-    user.avatar = input.avatar ?? user.avatar;
-    user.lastLoginAt = timestamp;
-    user.updatedAt = timestamp;
-  }
   await writeDb(db);
   return authContext(db, user.id)!;
 }

@@ -7,7 +7,6 @@ import {
   changeUserPassword,
   createPasswordReset,
   getAuthContext,
-  googleLoginUser,
   loginUser,
   resetUserPassword,
   signupUser,
@@ -72,18 +71,6 @@ router.post("/auth/login", rateLimitAuth, asyncRoute(async (request, response) =
     password: z.string().min(1),
   }).parse(request.body);
   const context = await loginUser(input.email, input.password);
-  response.json(authResponse(context));
-}));
-
-router.post("/auth/google", rateLimitAuth, asyncRoute(async (request, response) => {
-  const input = z.object({
-    credential: z.string().optional(),
-    googleId: z.string().optional(),
-    email: z.string().trim().email(),
-    fullName: z.string().trim().min(1),
-    avatar: z.string().optional(),
-  }).parse(request.body);
-  const context = await googleLoginUser(input);
   response.json(authResponse(context));
 }));
 
