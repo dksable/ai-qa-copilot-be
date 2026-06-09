@@ -36,7 +36,7 @@ const AiTestPlanSchema = z.object({
   negative: z.array(TestCaseSchema).min(1),
   edge: z.array(TestCaseSchema).min(1),
   testData: z.array(TestDataItemSchema),
-  playwright: z.string(),
+  playwright: z.string().optional(),
 });
 
 const SYSTEM_PROMPT = `You are a senior QA architect. Given a user story, requirement, or acceptance criteria, generate a comprehensive, professional test plan.
