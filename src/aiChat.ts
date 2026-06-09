@@ -46,6 +46,60 @@ Playwright Skeleton:
 ${history?.output.playwright || "Not available"}`;
 }
 
+function isPlaywrightRequest(message: string) {
+  return /\b(playwright|playwrite|e2e|automation|automated test|browser test)\b/i.test(message);
+}
+
+function includesPlaywrightCode(content: string) {
+  return /@playwright\/test|import\s+\{\s*test\s*,\s*expect\s*\}|test\.describe|page\.goto/i.test(content);
+}
+
+function safeTestName(value: string) {
+  return value.replace(/\s+/g, " ").replace(/"/g, "'").trim();
+}
+
+function buildFallbackPlaywright(context: AIChatContext) {
+  if (context.history?.output.playwright) return context.history.output.playwright;
+
+  const requirementTitle = safeTestName(context.requirement.title || "Selected requirement");
+  const requirementText = context.requirement.description || context.requirement.title;
+  const preview = requirementText.split(/\s+/).slice(0, 18).join(" ");
+
+  return `import { test, expect } from "@playwright/test";
+
+test.describe(${JSON.stringify(requirementTitle)}, () => {
+  test("validates the primary requirement flow", async ({ page }) => {
+    await page.goto("/");
+
+    await page.getByLabel(/requirement|user story|description/i).fill(${JSON.stringify(preview)});
+    await page.getByRole("button", { name: /generate|submit|save/i }).click();
+
+    await expect(page.getByText(/success|generated|saved|completed/i)).toBeVisible();
+  });
+
+  test("shows validation for missing required input", async ({ page }) => {
+    await page.goto("/");
+
+    await page.getByRole("button", { name: /generate|submit|save/i }).click();
+
+    await expect(page.getByText(/required|invalid|at least/i)).toBeVisible();
+  });
+});`;
+}
+
+function ensurePlaywrightResponse(context: AIChatContext, userMessage: string, aiResponse: string) {
+  if (!isPlaywrightRequest(userMessage) || includesPlaywrightCode(aiResponse)) return aiResponse;
+
+  const skeleton = buildFallbackPlaywright(context);
+  return `${aiResponse.trim()}
+
+### Playwright Test Skeleton
+
+\`\`\`ts
+${skeleton}
+\`\`\``;
+}
+
 export async function generateAIChatResponse(context: AIChatContext, userMessage: string) {
   const apiKey = process.env.GROQ_API_KEY;
   if (!apiKey) {
@@ -57,7 +111,7 @@ export async function generateAIChatResponse(context: AIChatContext, userMessage
     {
       role: "system",
       content:
-        "You are AI QA Copilot, a senior QA assistant. Answer only using the selected requirement context. If context is missing, clearly state what is missing. Provide concise, actionable QA guidance. Use markdown tables or code blocks when helpful. Do not claim to update stored test cases unless the user explicitly saves a new version.",
+        "You are AI QA Copilot, a senior QA assistant. Answer only using the selected requirement context. If context is missing, clearly state what is missing. Provide concise, actionable QA guidance. Use markdown tables or code blocks when helpful. When the user asks for Playwright tests, include a valid TypeScript code block using @playwright/test with import { test, expect } from \"@playwright/test\". Do not claim to update stored test cases unless the user explicitly saves a new version.",
     },
     {
       role: "user",
@@ -97,5 +151,5 @@ export async function generateAIChatResponse(context: AIChatContext, userMessage
   if (typeof content !== "string") {
     throw new Error("AI chat response did not include message content.");
   }
-  return content;
+  return ensurePlaywrightResponse(context, userMessage, content);
 }
