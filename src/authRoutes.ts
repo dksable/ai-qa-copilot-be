@@ -2,6 +2,7 @@ import { type RequestHandler, Router } from "express";
 import { z } from "zod";
 
 import { signAccessToken } from "./authToken.js";
+import { sendPasswordResetEmail } from "./emailService.js";
 import { requireAuth } from "./permissionMiddleware.js";
 import {
   changeUserPassword,
@@ -86,10 +87,22 @@ router.get("/auth/me", requireAuth, asyncRoute(async (request, response) => {
 router.post("/auth/forgot-password", rateLimitAuth, asyncRoute(async (request, response) => {
   const { email } = z.object({ email: z.string().trim().email() }).parse(request.body);
   const reset = await createPasswordReset(email);
+  let emailSent = false;
+  if (reset?.resetLink) {
+    try {
+      await sendPasswordResetEmail(email, reset.resetLink);
+      emailSent = true;
+    } catch (error) {
+      console.error("Password reset email failed", error instanceof Error ? error.message : "Unknown email error");
+    }
+  }
   response.json({
-    message: "If an account exists, password reset instructions are available.",
+    message: emailSent
+      ? "If an account exists, password reset instructions have been sent."
+      : "If an account exists, password reset instructions are available.",
     resetLink: reset?.resetLink,
     resetToken: reset?.resetToken,
+    emailSent,
   });
 }));
 

@@ -22,6 +22,7 @@ import type {
   AIProviderUsageLog,
   AIProviderUsageStatus,
   ActivityLog,
+  AutomationRepositoryConfig,
   BillingCycle,
   DashboardStats,
   EntityStatus,
@@ -35,6 +36,7 @@ import type {
   Plan,
   PlanId,
   ProjectPermissionLevel,
+  RepositoryAnalysis,
   Project,
   ProjectDatabase,
   ProjectDomain,
@@ -238,6 +240,8 @@ const initialDb: ProjectDatabase = {
   aiProviderConfigs: [],
   aiProviderFeatureMappings: [],
   aiProviderUsageLogs: [],
+  automationRepositoryConfigs: [],
+  repositoryAnalyses: [],
   testRuns: [],
   testExecutions: [],
   testExecutionHistories: [],
@@ -287,6 +291,8 @@ export function decryptAIProviderSecret(value?: string) {
   ]).toString("utf8");
 }
 
+export const decryptAutomationRepositoryToken = decryptAIProviderSecret;
+
 function maskSecret(value: string) {
   if (!value) return "";
   if (value.length <= 8) return "••••••••";
@@ -324,6 +330,8 @@ async function readDb(): Promise<ProjectDatabase> {
     aiProviderConfigs: (db.aiProviderConfigs ?? []).map(normalizeAIProviderConfig),
     aiProviderFeatureMappings: db.aiProviderFeatureMappings ?? [],
     aiProviderUsageLogs: db.aiProviderUsageLogs ?? [],
+    automationRepositoryConfigs: (db.automationRepositoryConfigs ?? []).map(normalizeAutomationRepositoryConfig),
+    repositoryAnalyses: (db.repositoryAnalyses ?? []).map(normalizeRepositoryAnalysis),
     testRuns: db.testRuns ?? [],
     testExecutions: db.testExecutions ?? [],
     testExecutionHistories: db.testExecutionHistories ?? [],
@@ -391,8 +399,47 @@ function normalizeAIProviderConfig(config: AIProviderConfig): AIProviderConfig {
   };
 }
 
+function normalizeAutomationRepositoryConfig(config: AutomationRepositoryConfig): AutomationRepositoryConfig {
+  const timestamp = config.createdAt ?? now();
+  return {
+    ...config,
+    workspaceId: config.workspaceId ?? defaultWorkspaceId,
+    provider: "github",
+    defaultBranch: config.defaultBranch ?? "main",
+    testFolderPath: (config.testFolderPath ?? "tests/e2e").replace(/^\/+|\/+$/g, ""),
+    createdAt: timestamp,
+    updatedAt: config.updatedAt ?? timestamp,
+  };
+}
+
+function normalizeRepositoryAnalysis(analysis: RepositoryAnalysis): RepositoryAnalysis {
+  const timestamp = analysis.createdAt ?? now();
+  return {
+    ...analysis,
+    provider: "github",
+    framework: analysis.framework ?? "Unknown",
+    language: analysis.language ?? "Unknown",
+    buildTool: analysis.buildTool ?? "Unknown",
+    testFolderPath: analysis.testFolderPath ?? "tests/e2e",
+    usesPageObjectModel: analysis.usesPageObjectModel ?? false,
+    usesFixtures: analysis.usesFixtures ?? false,
+    namingConvention: analysis.namingConvention ?? "*.spec.ts",
+    importStyle: analysis.importStyle ?? "@playwright/test",
+    pattern: analysis.pattern ?? "Direct Playwright",
+    confidenceScore: analysis.confidenceScore ?? 0,
+    scannedFiles: analysis.scannedFiles ?? [],
+    createdAt: timestamp,
+    updatedAt: analysis.updatedAt ?? timestamp,
+  };
+}
+
 function sanitizeAIProvider(config: AIProviderConfig) {
   const { apiKeyEncrypted: _apiKeyEncrypted, ...safe } = config;
+  return safe;
+}
+
+function sanitizeAutomationRepositoryConfig(config: AutomationRepositoryConfig) {
+  const { tokenEncrypted: _tokenEncrypted, ...safe } = config;
   return safe;
 }
 
@@ -1831,6 +1878,158 @@ export async function listAIProviderUsage(workspaceId = defaultWorkspaceId) {
   return db.aiProviderUsageLogs
     .filter((log) => log.workspaceId === workspaceId)
     .sort((a, b) => b.createdAt.localeCompare(a.createdAt));
+}
+
+export async function getAutomationRepositoryConfig(workspaceId = defaultWorkspaceId) {
+  const db = await readDb();
+  const config = db.automationRepositoryConfigs.find(
+    (item) => item.workspaceId === workspaceId && item.provider === "github",
+  );
+  return config ? sanitizeAutomationRepositoryConfig(config) : null;
+}
+
+export async function getAutomationRepositoryRuntimeConfig(workspaceId = defaultWorkspaceId) {
+  const db = await readDb();
+  const config = db.automationRepositoryConfigs.find(
+    (item) => item.workspaceId === workspaceId && item.provider === "github",
+  );
+  return config
+    ? {
+        ...config,
+        token: decryptAutomationRepositoryToken(config.tokenEncrypted),
+      }
+    : null;
+}
+
+export async function saveAutomationRepositoryConfig(input: {
+  workspaceId: string;
+  token: string;
+  owner: string;
+  repo: string;
+  defaultBranch: string;
+  testFolderPath: string;
+  userId?: string;
+}) {
+  const db = await readDb();
+  const timestamp = now();
+  const folderPath = input.testFolderPath.replace(/^\/+|\/+$/g, "") || "tests/e2e";
+  let config = db.automationRepositoryConfigs.find(
+    (item) => item.workspaceId === input.workspaceId && item.provider === "github",
+  );
+  if (!config) {
+    config = {
+      id: createId("automation_repo"),
+      workspaceId: input.workspaceId,
+      provider: "github",
+      tokenEncrypted: encryptSecret(input.token),
+      tokenMasked: maskSecret(input.token),
+      owner: input.owner,
+      repo: input.repo,
+      defaultBranch: input.defaultBranch,
+      testFolderPath: folderPath,
+      createdBy: input.userId ?? defaultUserId,
+      createdAt: timestamp,
+      updatedAt: timestamp,
+    };
+    db.automationRepositoryConfigs.push(config);
+  } else {
+    config.tokenEncrypted = encryptSecret(input.token);
+    config.tokenMasked = maskSecret(input.token);
+    config.owner = input.owner;
+    config.repo = input.repo;
+    config.defaultBranch = input.defaultBranch;
+    config.testFolderPath = folderPath;
+    config.updatedBy = input.userId;
+    config.updatedAt = timestamp;
+  }
+  addActivityLog(db, {
+    workspaceId: input.workspaceId,
+    action: "GitHub automation repository connected",
+    resourceType: "AutomationRepositoryConfig",
+    resourceId: config.id,
+    newValue: {
+      provider: config.provider,
+      owner: config.owner,
+      repo: config.repo,
+      defaultBranch: config.defaultBranch,
+      testFolderPath: config.testFolderPath,
+    },
+  });
+  await writeDb(db);
+  return sanitizeAutomationRepositoryConfig(config);
+}
+
+export async function saveRepositoryAnalysis(input: Omit<RepositoryAnalysis, "id" | "createdAt" | "updatedAt">) {
+  const db = await readDb();
+  const timestamp = now();
+  db.repositoryAnalyses = db.repositoryAnalyses.filter(
+    (item) => !(item.workspaceId === input.workspaceId && item.integrationId === input.integrationId),
+  );
+  const analysis: RepositoryAnalysis = {
+    id: createId("repo_analysis"),
+    createdAt: timestamp,
+    updatedAt: timestamp,
+    ...input,
+  };
+  db.repositoryAnalyses.unshift(analysis);
+  addActivityLog(db, {
+    workspaceId: input.workspaceId,
+    action: "GitHub repository analyzed",
+    resourceType: "RepositoryAnalysis",
+    resourceId: analysis.id,
+    newValue: {
+      framework: analysis.framework,
+      language: analysis.language,
+      testFolderPath: analysis.testFolderPath,
+      confidenceScore: analysis.confidenceScore,
+    },
+  });
+  await writeDb(db);
+  return analysis;
+}
+
+export async function getRepositoryAnalysis(workspaceId = defaultWorkspaceId) {
+  const db = await readDb();
+  const config = db.automationRepositoryConfigs.find(
+    (item) => item.workspaceId === workspaceId && item.provider === "github",
+  );
+  if (!config) return null;
+  return db.repositoryAnalyses.find(
+    (item) => item.workspaceId === workspaceId && item.integrationId === config.id,
+  ) ?? null;
+}
+
+export async function overrideRepositoryAnalysis(
+  workspaceId: string,
+  input: Partial<Pick<
+    RepositoryAnalysis,
+    "framework" | "language" | "buildTool" | "testFolderPath" | "pageObjectFolderPath" | "usesPageObjectModel" | "usesFixtures" | "namingConvention" | "importStyle" | "pattern" | "confidenceScore"
+  >>,
+  userId?: string,
+) {
+  const db = await readDb();
+  const config = db.automationRepositoryConfigs.find(
+    (item) => item.workspaceId === workspaceId && item.provider === "github",
+  );
+  if (!config) return null;
+  const analysis = db.repositoryAnalyses.find(
+    (item) => item.workspaceId === workspaceId && item.integrationId === config.id,
+  );
+  if (!analysis) return null;
+  Object.assign(analysis, input, {
+    confidenceScore: input.confidenceScore ?? Math.max(analysis.confidenceScore, 80),
+    updatedAt: now(),
+  });
+  addActivityLog(db, {
+    workspaceId,
+    actorId: userId,
+    action: "Repository analysis overridden",
+    resourceType: "RepositoryAnalysis",
+    resourceId: analysis.id,
+    newValue: input,
+  });
+  await writeDb(db);
+  return analysis;
 }
 
 export async function listApprovedTestCaseVersions(filters: {

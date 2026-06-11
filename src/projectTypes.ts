@@ -47,6 +47,16 @@ export type AIProviderFeatureName =
   | "coverage-score";
 export type AIProviderRequestFormat = "OpenAI Compatible";
 export type AIProviderUsageStatus = "Success" | "Failed";
+export type AutomationRepositoryProvider = "github";
+export type RepositoryAnalysisLanguage = "TypeScript" | "JavaScript" | "Java" | "Unknown";
+export type RepositoryAnalysisFramework =
+  | "Playwright"
+  | "Playwright Test Runner"
+  | "Java Playwright"
+  | "Custom Playwright setup"
+  | "Unknown";
+export type RepositoryAnalysisBuildTool = "npm" | "Maven" | "Gradle" | "Unknown";
+export type RepositoryAnalysisPattern = "Page Object Model" | "Fixtures" | "Direct Playwright" | "Custom";
 
 export interface User {
   id: string;
@@ -387,6 +397,47 @@ export interface AIProviderUsageLog {
   createdAt: string;
 }
 
+export interface AutomationRepositoryConfig {
+  id: string;
+  workspaceId: string;
+  provider: AutomationRepositoryProvider;
+  tokenEncrypted: string;
+  tokenMasked: string;
+  owner: string;
+  repo: string;
+  defaultBranch: string;
+  testFolderPath: string;
+  createdBy: string;
+  updatedBy?: string;
+  createdAt: string;
+  updatedAt: string;
+}
+
+export interface RepositoryAnalysis {
+  id: string;
+  workspaceId: string;
+  integrationId: string;
+  provider: AutomationRepositoryProvider;
+  repoOwner: string;
+  repoName: string;
+  branch: string;
+  framework: RepositoryAnalysisFramework;
+  language: RepositoryAnalysisLanguage;
+  buildTool: RepositoryAnalysisBuildTool;
+  testFolderPath: string;
+  pageObjectFolderPath?: string;
+  usesPageObjectModel: boolean;
+  usesFixtures: boolean;
+  namingConvention: string;
+  importStyle: string;
+  pattern: RepositoryAnalysisPattern;
+  confidenceScore: number;
+  scannedFiles: string[];
+  createdBy: string;
+  createdAt: string;
+  updatedAt: string;
+}
+
 export interface ProjectSummary extends Project {
   totalModules: number;
   totalRequirements: number;
@@ -487,6 +538,8 @@ export interface ProjectDatabase {
   aiProviderConfigs: AIProviderConfig[];
   aiProviderFeatureMappings: AIProviderFeatureMapping[];
   aiProviderUsageLogs: AIProviderUsageLog[];
+  automationRepositoryConfigs: AutomationRepositoryConfig[];
+  repositoryAnalyses: RepositoryAnalysis[];
   testRuns: TestRun[];
   testExecutions: TestExecution[];
   testExecutionHistories: TestExecutionHistory[];

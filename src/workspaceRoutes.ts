@@ -1,6 +1,7 @@
 import { type RequestHandler, Router } from "express";
 import { z } from "zod";
 
+import { sendWorkspaceInviteEmail } from "./emailService.js";
 import { requireAuth, requireRole, requireWorkspaceAccess } from "./permissionMiddleware.js";
 import {
   acceptWorkspaceInvite,
@@ -155,7 +156,21 @@ router.post("/workspaces/:id/invites", canManageWorkspace, asyncRoute(async (req
     response.status(404).json({ message: "Workspace not found." });
     return;
   }
-  response.status(201).json(invite);
+  const workspace = await getWorkspace(param(request.params.id));
+  let emailSent = false;
+  try {
+    await sendWorkspaceInviteEmail({
+      to: invite.email,
+      workspaceName: workspace?.workspace.workspaceName ?? "AI QA Copilot Workspace",
+      role: invite.role,
+      inviteLink: invite.inviteLink,
+      message: invite.message,
+    });
+    emailSent = true;
+  } catch (error) {
+    console.error("Workspace invite email failed", error instanceof Error ? error.message : "Unknown email error");
+  }
+  response.status(201).json({ ...invite, emailSent });
 }));
 
 router.get("/workspaces/:id/invites", canManageWorkspace, asyncRoute(async (request, response) => {
@@ -187,7 +202,21 @@ router.post("/workspaces/:id/invites/:inviteId/resend", canManageWorkspace, asyn
     response.status(404).json({ message: "Invite not found." });
     return;
   }
-  response.json(invite);
+  const workspace = await getWorkspace(param(request.params.id));
+  let emailSent = false;
+  try {
+    await sendWorkspaceInviteEmail({
+      to: invite.email,
+      workspaceName: workspace?.workspace.workspaceName ?? "AI QA Copilot Workspace",
+      role: invite.role,
+      inviteLink: `/invite/${invite.token}`,
+      message: invite.message,
+    });
+    emailSent = true;
+  } catch (error) {
+    console.error("Workspace invite resend email failed", error instanceof Error ? error.message : "Unknown email error");
+  }
+  response.json({ ...invite, inviteLink: `/invite/${invite.token}`, emailSent });
 }));
 
 router.get("/workspaces/:id/permissions/me", canAccessWorkspace, asyncRoute(async (request, response) => {
