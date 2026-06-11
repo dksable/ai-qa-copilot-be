@@ -37,6 +37,11 @@ import type {
   PlanId,
   ProjectPermissionLevel,
   RepositoryAnalysis,
+  RepositoryAISuggestion,
+  RepositoryChangedFile,
+  RepositoryImpactedTest,
+  RepositoryRiskLevel,
+  RepositorySync,
   Project,
   ProjectDatabase,
   ProjectDomain,
@@ -242,6 +247,7 @@ const initialDb: ProjectDatabase = {
   aiProviderUsageLogs: [],
   automationRepositoryConfigs: [],
   repositoryAnalyses: [],
+  repositorySyncs: [],
   testRuns: [],
   testExecutions: [],
   testExecutionHistories: [],
@@ -332,6 +338,7 @@ async function readDb(): Promise<ProjectDatabase> {
     aiProviderUsageLogs: db.aiProviderUsageLogs ?? [],
     automationRepositoryConfigs: (db.automationRepositoryConfigs ?? []).map(normalizeAutomationRepositoryConfig),
     repositoryAnalyses: (db.repositoryAnalyses ?? []).map(normalizeRepositoryAnalysis),
+    repositorySyncs: (db.repositorySyncs ?? []).map(normalizeRepositorySync),
     testRuns: db.testRuns ?? [],
     testExecutions: db.testExecutions ?? [],
     testExecutionHistories: db.testExecutionHistories ?? [],
@@ -430,6 +437,21 @@ function normalizeRepositoryAnalysis(analysis: RepositoryAnalysis): RepositoryAn
     scannedFiles: analysis.scannedFiles ?? [],
     createdAt: timestamp,
     updatedAt: analysis.updatedAt ?? timestamp,
+  };
+}
+
+function normalizeRepositorySync(sync: RepositorySync): RepositorySync {
+  const timestamp = sync.createdAt ?? now();
+  return {
+    ...sync,
+    provider: "github",
+    changedFiles: sync.changedFiles ?? [],
+    impactedTests: sync.impactedTests ?? [],
+    aiSuggestions: sync.aiSuggestions ?? [],
+    riskLevel: sync.riskLevel ?? "Low",
+    status: sync.status ?? "Completed",
+    createdAt: timestamp,
+    updatedAt: sync.updatedAt ?? timestamp,
   };
 }
 
@@ -2030,6 +2052,98 @@ export async function overrideRepositoryAnalysis(
   });
   await writeDb(db);
   return analysis;
+}
+
+export async function latestRepositorySync(workspaceId = defaultWorkspaceId) {
+  const db = await readDb();
+  const config = db.automationRepositoryConfigs.find(
+    (item) => item.workspaceId === workspaceId && item.provider === "github",
+  );
+  if (!config) return null;
+  return db.repositorySyncs
+    .filter((sync) => sync.workspaceId === workspaceId && sync.integrationId === config.id && sync.status === "Completed")
+    .sort((a, b) => b.createdAt.localeCompare(a.createdAt))[0] ?? null;
+}
+
+export async function createRepositorySync(input: {
+  workspaceId: string;
+  integrationId: string;
+  repoOwner: string;
+  repoName: string;
+  branch: string;
+  previousCommitSha?: string;
+  latestCommitSha: string;
+  changedFiles: RepositoryChangedFile[];
+  impactedTests: RepositoryImpactedTest[];
+  riskLevel: RepositoryRiskLevel;
+  status?: RepositorySync["status"];
+  createdBy?: string;
+}) {
+  const db = await readDb();
+  const timestamp = now();
+  const sync: RepositorySync = {
+    id: createId("repo_sync"),
+    provider: "github",
+    aiSuggestions: [],
+    createdAt: timestamp,
+    updatedAt: timestamp,
+    status: input.status ?? "Completed",
+    createdBy: input.createdBy ?? defaultUserId,
+    ...input,
+  };
+  db.repositorySyncs.unshift(sync);
+  addActivityLog(db, {
+    workspaceId: input.workspaceId,
+    action: "GitHub repository synced",
+    resourceType: "RepositorySync",
+    resourceId: sync.id,
+    newValue: {
+      changedFiles: sync.changedFiles.length,
+      impactedTests: sync.impactedTests.length,
+      riskLevel: sync.riskLevel,
+    },
+  });
+  await writeDb(db);
+  return sync;
+}
+
+export async function listRepositorySyncs(workspaceId = defaultWorkspaceId) {
+  const db = await readDb();
+  return db.repositorySyncs
+    .filter((sync) => sync.workspaceId === workspaceId)
+    .sort((a, b) => b.createdAt.localeCompare(a.createdAt));
+}
+
+export async function getRepositorySync(syncId: string) {
+  const db = await readDb();
+  return db.repositorySyncs.find((sync) => sync.id === syncId) ?? null;
+}
+
+export async function updateRepositorySyncSuggestions(syncId: string, suggestions: RepositoryAISuggestion[]) {
+  const db = await readDb();
+  const sync = db.repositorySyncs.find((item) => item.id === syncId);
+  if (!sync) return null;
+  sync.aiSuggestions = suggestions;
+  sync.updatedAt = now();
+  await writeDb(db);
+  return sync;
+}
+
+export async function updateRepositorySyncPr(syncId: string, prUrl: string) {
+  const db = await readDb();
+  const sync = db.repositorySyncs.find((item) => item.id === syncId);
+  if (!sync) return null;
+  sync.prUrl = prUrl;
+  sync.updatedAt = now();
+  addActivityLog(db, {
+    workspaceId: sync.workspaceId,
+    action: "Repository sync PR created",
+    resourceType: "RepositorySync",
+    resourceId: sync.id,
+    newValue: { prUrl },
+  });
+  await writeDb(db);
+  return sync;
 }
 
 export async function listApprovedTestCaseVersions(filters: {

@@ -1,8 +1,12 @@
 import type {
+  RepositoryAISuggestion,
+  RepositoryChangedFile,
+  RepositoryImpactedTest,
   RepositoryAnalysisBuildTool,
   RepositoryAnalysisFramework,
   RepositoryAnalysisLanguage,
   RepositoryAnalysisPattern,
+  RepositoryRiskLevel,
 } from "./projectTypes.js";
 
 export interface GitHubAutomationConfig {
@@ -40,6 +44,14 @@ export interface RepositoryAnalysisSummary {
   scannedFiles: string[];
 }
 
+export interface RepositorySyncDetection {
+  latestCommitSha: string;
+  changedFiles: RepositoryChangedFile[];
+  impactedTests: RepositoryImpactedTest[];
+  riskLevel: RepositoryRiskLevel;
+  testFiles: string[];
+}
+
 interface GitHubApiError extends Error {
   statusCode?: number;
 }
@@ -64,6 +76,11 @@ function slugify(value: string) {
     .replace(/[^a-z0-9]+/g, "-")
     .replace(/^-+|-+$/g, "")
     .slice(0, 48) || "playwright-tests";
+}
+
+function titleFromPath(filePath: string) {
+  const name = filePath.split("/").pop() ?? filePath;
+  return name.replace(/\.[^.]+$/, "").replace(/[-_.]+/g, " ").replace(/\b\w/g, (match) => match.toUpperCase());
 }
 
 async function githubRequest<T>(
@@ -114,6 +131,10 @@ async function getRepositoryTree(config: GitHubAutomationConfig) {
     `/repos/${encodeURIComponent(config.owner)}/${encodeURIComponent(config.repo)}/git/trees/${encodeURIComponent(baseSha)}?recursive=1`,
   );
   return tree.tree;
+}
+
+export async function getLatestCommitSha(config: GitHubAutomationConfig) {
+  return getDefaultBranch(config);
 }
 
 async function readRepositoryFile(config: GitHubAutomationConfig, filePath: string) {
@@ -265,6 +286,197 @@ export async function analyzeGitHubRepository(config: GitHubAutomationConfig): P
     pattern,
     confidenceScore,
     scannedFiles: [...new Set([...existingImportantFiles, ...candidateTestFiles.slice(0, 10), ...candidatePageFiles.slice(0, 6), ...candidateFixtureFiles.slice(0, 4)])],
+  };
+}
+
+function riskForChangedFile(filePath: string): RepositoryRiskLevel {
+  if (/(\.spec\.|\.test\.|Test\.java$|playwright\.config|package\.json|pom\.xml|build\.gradle)/i.test(filePath)) return "High";
+  if (/(routes?|api|pages?|components?|views?|controllers?|services?)/i.test(filePath)) return "Medium";
+  return "Low";
+}
+
+function changeTypeFromStatus(status: string): RepositoryChangedFile["changeType"] {
+  if (status === "added") return "Added";
+  if (status === "removed") return "Deleted";
+  return "Modified";
+}
+
+function relatedModule(filePath: string) {
+  const basename = titleFromPath(filePath);
+  const segment = filePath.split("/").find((part) => !["src", "app", "pages", "components", "routes", "api", "tests", "e2e", "specs"].includes(part.toLowerCase()));
+  return titleFromPath(segment || basename);
+}
+
+function possibleImpact(filePath: string, riskLevel: RepositoryRiskLevel) {
+  if (/(\.spec\.|\.test\.|Test\.java$)/i.test(filePath)) return "Existing automation test changed and should be reviewed.";
+  if (/playwright\.config|package\.json|pom\.xml|build\.gradle/i.test(filePath)) return "Automation runtime/configuration changed; regression suite may need validation.";
+  if (riskLevel === "Medium") return "Application behavior or UI surface may have changed; related Playwright coverage should be reviewed.";
+  return "Low-risk repository change; review related tests if module behavior changed.";
+}
+
+export async function detectRepositorySyncImpact(
+  config: GitHubAutomationConfig,
+  input: {
+    previousCommitSha?: string;
+    analysis?: RepositoryAnalysisSummary | null;
+  },
+): Promise<RepositorySyncDetection> {
+  const latestCommitSha = await getLatestCommitSha(config);
+  const tree = await getRepositoryTree(config);
+  const allPaths = tree.map((item) => item.path);
+  const testFolder = input.analysis?.testFolderPath || config.testFolderPath;
+  const testFiles = allPaths.filter((path) =>
+    path.startsWith(`${testFolder.replace(/^\/+|\/+$/g, "")}/`) ||
+    /(\.spec\.(ts|js|tsx|jsx)|\.test\.(ts|js|tsx|jsx)|Test\.java)$/i.test(path),
+  );
+  let rawChangedFiles: Array<{ filename: string; status: string }> = [];
+  if (input.previousCommitSha && input.previousCommitSha !== latestCommitSha) {
+    const compare = await githubRequest<{ files?: Array<{ filename: string; status: string }> }>(
+      config,
+      `/repos/${encodeURIComponent(config.owner)}/${encodeURIComponent(config.repo)}/compare/${encodeURIComponent(input.previousCommitSha)}...${encodeURIComponent(latestCommitSha)}`,
+    );
+    rawChangedFiles = compare.files ?? [];
+  } else {
+    const commit = await githubRequest<{ files?: Array<{ filename: string; status: string }> }>(
+      config,
+      `/repos/${encodeURIComponent(config.owner)}/${encodeURIComponent(config.repo)}/commits/${encodeURIComponent(latestCommitSha)}`,
+    );
+    rawChangedFiles = commit.files ?? [];
+  }
+  const changedFiles = rawChangedFiles.slice(0, 60).map((file) => {
+    const riskLevel = riskForChangedFile(file.filename);
+    return {
+      filePath: file.filename,
+      changeType: changeTypeFromStatus(file.status),
+      relatedModule: relatedModule(file.filename),
+      riskLevel,
+      possibleTestImpact: possibleImpact(file.filename, riskLevel),
+    };
+  });
+  const impactedTests: RepositoryImpactedTest[] = [];
+  for (const changed of changedFiles) {
+    const moduleSlug = changed.relatedModule.toLowerCase().replace(/\s+/g, "");
+    const matches = testFiles.filter((testFile) => {
+      const normalized = testFile.toLowerCase().replace(/[^a-z0-9]/g, "");
+      const changedBase = titleFromPath(changed.filePath).toLowerCase().replace(/\s+/g, "");
+      return normalized.includes(moduleSlug) || normalized.includes(changedBase);
+    });
+    const targets = matches.length ? matches.slice(0, 3) : testFiles.slice(0, changed.riskLevel === "High" ? 3 : 1);
+    targets.forEach((testFile) => {
+      impactedTests.push({
+        testFile,
+        relatedChangedFile: changed.filePath,
+        impactReason: changed.riskLevel === "High"
+          ? "High-risk source or automation change may require Playwright updates."
+          : "Related module changed; review automation coverage for this area.",
+        suggestedAction: changed.changeType === "Added" ? "Add" : changed.changeType === "Deleted" ? "Review" : changed.riskLevel === "Low" ? "No Action" : "Update",
+        confidenceScore: matches.includes(testFile) ? 84 : changed.riskLevel === "High" ? 68 : 52,
+      });
+    });
+  }
+  const highestRisk: RepositoryRiskLevel = changedFiles.some((file) => file.riskLevel === "High")
+    ? "High"
+    : changedFiles.some((file) => file.riskLevel === "Medium")
+      ? "Medium"
+      : "Low";
+  return {
+    latestCommitSha,
+    changedFiles,
+    impactedTests: impactedTests.slice(0, 40),
+    riskLevel: highestRisk,
+    testFiles,
+  };
+}
+
+export function generateRepositorySyncSuggestions(input: {
+  changedFiles: RepositoryChangedFile[];
+  impactedTests: RepositoryImpactedTest[];
+  riskLevel: RepositoryRiskLevel;
+}): RepositoryAISuggestion[] {
+  if (!input.changedFiles.length) {
+    return [{
+      summary: "No new repository changes were detected since the last sync.",
+      impactedTests: [],
+      suggestedUpdates: ["No update PR is required at this time."],
+      riskLevel: "Low",
+      recommendedPrAction: "No Action",
+    }];
+  }
+  const highRiskFiles = input.changedFiles.filter((file) => file.riskLevel === "High");
+  const impacted = input.impactedTests.slice(0, 8).map((item) => item.testFile);
+  return [{
+    summary: `${input.changedFiles.length} changed file(s) detected with ${input.impactedTests.length} potentially impacted Playwright test(s).`,
+    impactedTests: [...new Set(impacted)],
+    suggestedUpdates: [
+      highRiskFiles.length ? "Review automation configuration and changed test files first." : "Review changed modules against related Playwright coverage.",
+      "Validate locators, route expectations, and API mocks for impacted flows.",
+      "Add regression coverage for newly added modules, pages, or API endpoints.",
+      "Remove or update tests for deleted flows to reduce flaky failures.",
+    ],
+    riskLevel: input.riskLevel,
+    recommendedPrAction: input.riskLevel === "Low" ? "Create review note PR if desired" : "Create update PR for QA review",
+  }];
+}
+
+export async function createRepositorySyncPullRequest(
+  config: GitHubAutomationConfig,
+  input: {
+    changedFiles: RepositoryChangedFile[];
+    impactedTests: RepositoryImpactedTest[];
+    suggestions: RepositoryAISuggestion[];
+    riskLevel: RepositoryRiskLevel;
+  },
+) {
+  const timestamp = new Date().toISOString().replace(/[-:]/g, "").slice(0, 12);
+  const branchName = `aiqa/repository-sync-${timestamp}`;
+  const reportPath = `aiqa-repository-sync/repository-sync-${timestamp}.md`;
+  const report = [
+    "# AI QA Copilot: Repository Sync Test Updates",
+    "",
+    `Risk Level: ${input.riskLevel}`,
+    "",
+    "## Changed Files",
+    ...input.changedFiles.map((file) => `- ${file.changeType}: \`${file.filePath}\` (${file.riskLevel}) - ${file.possibleTestImpact}`),
+    "",
+    "## Impacted Tests",
+    ...input.impactedTests.map((test) => `- \`${test.testFile}\` from \`${test.relatedChangedFile}\` - ${test.suggestedAction} (${test.confidenceScore}% confidence)`),
+    "",
+    "## AI Recommendations",
+    ...input.suggestions.flatMap((suggestion) => [
+      `- ${suggestion.summary}`,
+      ...suggestion.suggestedUpdates.map((update) => `  - ${update}`),
+      `  - Recommended PR Action: ${suggestion.recommendedPrAction}`,
+    ]),
+  ].join("\n");
+  await createBranch(config, branchName);
+  await createOrUpdateFile(config, {
+    branchName,
+    filePath: reportPath,
+    content: report,
+    message: "AI QA Copilot: repository sync test impact report",
+  });
+  const pr = await createPullRequest(config, {
+    branchName,
+    title: "AI QA Copilot: Repository Sync Test Updates",
+    body: [
+      "This PR was generated from AI QA Copilot Repository Sync Beta.",
+      "",
+      `- Risk Level: ${input.riskLevel}`,
+      `- Changed Files: ${input.changedFiles.length}`,
+      `- Impacted Tests: ${input.impactedTests.length}`,
+      "",
+      "Changed files:",
+      ...input.changedFiles.slice(0, 20).map((file) => `- ${file.changeType}: \`${file.filePath}\` (${file.riskLevel})`),
+      "",
+      "AI recommendations:",
+      ...input.suggestions.map((suggestion) => `- ${suggestion.summary}`),
+    ].join("\n"),
+  });
+  return {
+    branchName,
+    reportPath,
+    pullRequestUrl: pr.html_url,
+    pullRequestNumber: pr.number,
   };
 }
 

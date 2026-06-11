@@ -3,6 +3,9 @@ import { z } from "zod";
 
 import {
   analyzeGitHubRepository,
+  createRepositorySyncPullRequest,
+  detectRepositorySyncImpact,
+  generateRepositorySyncSuggestions,
   getRepoInfo,
   pushPlaywrightTestToGitHub,
   type GitHubAutomationConfig,
@@ -12,9 +15,15 @@ import {
   getAutomationRepositoryRuntimeConfig,
   getCurrentWorkspaceMember,
   getRepositoryAnalysis,
+  getRepositorySync,
+  latestRepositorySync,
+  listRepositorySyncs,
   overrideRepositoryAnalysis,
+  createRepositorySync,
   saveRepositoryAnalysis,
   saveAutomationRepositoryConfig,
+  updateRepositorySyncPr,
+  updateRepositorySyncSuggestions,
 } from "./projectStore.js";
 import type { WorkspaceRole } from "./projectTypes.js";
 
@@ -163,6 +172,91 @@ integrationRouter.put("/integrations/github/analysis/override", asyncRoute(async
     return;
   }
   response.json(updated);
+}));
+
+integrationRouter.post("/integrations/github/sync", asyncRoute(async (request, response) => {
+  const input = z.object({ workspaceId: z.string().min(1) }).parse(request.body);
+  if (!(await requireWorkspaceRole(request, response, input.workspaceId, ["Owner", "Admin", "QA Lead", "QA Engineer"]))) return;
+  const runtimeConfig = await getAutomationRepositoryRuntimeConfig(input.workspaceId);
+  const config = toGitHubConfig(runtimeConfig);
+  const analysis = await getRepositoryAnalysis(input.workspaceId);
+  if (!analysis) {
+    response.status(400).json({ message: "Run Smart Repository Analysis before syncing repository changes." });
+    return;
+  }
+  const previous = await latestRepositorySync(input.workspaceId);
+  const detection = await detectRepositorySyncImpact(config, {
+    previousCommitSha: previous?.latestCommitSha,
+    analysis,
+  });
+  const sync = await createRepositorySync({
+    workspaceId: input.workspaceId,
+    integrationId: runtimeConfig!.id,
+    repoOwner: runtimeConfig!.owner,
+    repoName: runtimeConfig!.repo,
+    branch: runtimeConfig!.defaultBranch,
+    previousCommitSha: previous?.latestCommitSha,
+    latestCommitSha: detection.latestCommitSha,
+    changedFiles: detection.changedFiles,
+    impactedTests: detection.impactedTests,
+    riskLevel: detection.riskLevel,
+    status: "Completed",
+    createdBy: request.userId,
+  });
+  response.status(201).json(sync);
+}));
+
+integrationRouter.get("/integrations/github/sync-history", asyncRoute(async (request, response) => {
+  const { workspaceId } = z.object({ workspaceId: z.string().min(1) }).parse(request.query);
+  if (!(await requireWorkspaceRole(request, response, workspaceId, ["Owner", "Admin", "QA Lead", "QA Engineer"]))) return;
+  response.json(await listRepositorySyncs(workspaceId));
+}));
+
+integrationRouter.get("/integrations/github/sync/:syncId", asyncRoute(async (request, response) => {
+  const sync = await getRepositorySync(String(request.params.syncId));
+  if (!sync) {
+    response.status(404).json({ message: "Repository sync not found." });
+    return;
+  }
+  if (!(await requireWorkspaceRole(request, response, sync.workspaceId, ["Owner", "Admin", "QA Lead", "QA Engineer"]))) return;
+  response.json(sync);
+}));
+
+integrationRouter.post("/integrations/github/sync/:syncId/generate-suggestions", asyncRoute(async (request, response) => {
+  const sync = await getRepositorySync(String(request.params.syncId));
+  if (!sync) {
+    response.status(404).json({ message: "Repository sync not found." });
+    return;
+  }
+  if (!(await requireWorkspaceRole(request, response, sync.workspaceId, ["Owner", "Admin", "QA Lead", "QA Engineer"]))) return;
+  const suggestions = generateRepositorySyncSuggestions({
+    changedFiles: sync.changedFiles,
+    impactedTests: sync.impactedTests,
+    riskLevel: sync.riskLevel,
+  });
+  response.json(await updateRepositorySyncSuggestions(sync.id, suggestions));
+}));
+
+integrationRouter.post("/integrations/github/sync/:syncId/create-pr", asyncRoute(async (request, response) => {
+  const sync = await getRepositorySync(String(request.params.syncId));
+  if (!sync) {
+    response.status(404).json({ message: "Repository sync not found." });
+    return;
+  }
+  if (!(await requireWorkspaceRole(request, response, sync.workspaceId, ["Owner", "Admin", "QA Lead"]))) return;
+  if (!sync.aiSuggestions.length) {
+    response.status(400).json({ message: "Generate AI suggestions before creating an update PR." });
+    return;
+  }
+  const config = toGitHubConfig(await getAutomationRepositoryRuntimeConfig(sync.workspaceId));
+  const pr = await createRepositorySyncPullRequest(config, {
+    changedFiles: sync.changedFiles,
+    impactedTests: sync.impactedTests,
+    suggestions: sync.aiSuggestions,
+    riskLevel: sync.riskLevel,
+  });
+  const updated = await updateRepositorySyncPr(sync.id, pr.pullRequestUrl);
+  response.status(201).json({ ...updated, pullRequest: pr });
 }));
 
 integrationRouter.post("/integrations/github/push-playwright-test", asyncRoute(async (request, response) => {

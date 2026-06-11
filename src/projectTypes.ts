@@ -57,6 +57,10 @@ export type RepositoryAnalysisFramework =
   | "Unknown";
 export type RepositoryAnalysisBuildTool = "npm" | "Maven" | "Gradle" | "Unknown";
 export type RepositoryAnalysisPattern = "Page Object Model" | "Fixtures" | "Direct Playwright" | "Custom";
+export type RepositorySyncStatus = "Pending" | "Completed" | "Failed";
+export type RepositoryChangeType = "Added" | "Modified" | "Deleted";
+export type RepositoryRiskLevel = "Low" | "Medium" | "High";
+export type RepositorySuggestedAction = "Update" | "Add" | "Review" | "No Action";
 
 export interface User {
   id: string;
@@ -438,6 +442,51 @@ export interface RepositoryAnalysis {
   updatedAt: string;
 }
 
+export interface RepositoryChangedFile {
+  filePath: string;
+  changeType: RepositoryChangeType;
+  relatedModule: string;
+  riskLevel: RepositoryRiskLevel;
+  possibleTestImpact: string;
+}
+
+export interface RepositoryImpactedTest {
+  testFile: string;
+  relatedChangedFile: string;
+  impactReason: string;
+  suggestedAction: RepositorySuggestedAction;
+  confidenceScore: number;
+}
+
+export interface RepositoryAISuggestion {
+  summary: string;
+  impactedTests: string[];
+  suggestedUpdates: string[];
+  riskLevel: RepositoryRiskLevel;
+  recommendedPrAction: string;
+}
+
+export interface RepositorySync {
+  id: string;
+  workspaceId: string;
+  integrationId: string;
+  provider: AutomationRepositoryProvider;
+  repoOwner: string;
+  repoName: string;
+  branch: string;
+  previousCommitSha?: string;
+  latestCommitSha: string;
+  changedFiles: RepositoryChangedFile[];
+  impactedTests: RepositoryImpactedTest[];
+  aiSuggestions: RepositoryAISuggestion[];
+  riskLevel: RepositoryRiskLevel;
+  status: RepositorySyncStatus;
+  prUrl?: string;
+  createdBy: string;
+  createdAt: string;
+  updatedAt: string;
+}
+
 export interface ProjectSummary extends Project {
   totalModules: number;
   totalRequirements: number;
@@ -540,6 +589,7 @@ export interface ProjectDatabase {
   aiProviderUsageLogs: AIProviderUsageLog[];
   automationRepositoryConfigs: AutomationRepositoryConfig[];
   repositoryAnalyses: RepositoryAnalysis[];
+  repositorySyncs: RepositorySync[];
   testRuns: TestRun[];
   testExecutions: TestExecution[];
   testExecutionHistories: TestExecutionHistory[];
