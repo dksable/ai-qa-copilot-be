@@ -1,5 +1,12 @@
 import { mkdir, readFile, writeFile } from "node:fs/promises";
-import { randomBytes, scrypt as scryptCallback, timingSafeEqual } from "node:crypto";
+import {
+  createCipheriv,
+  createDecipheriv,
+  createHash,
+  randomBytes,
+  scrypt as scryptCallback,
+  timingSafeEqual,
+} from "node:crypto";
 import path from "node:path";
 import { fileURLToPath } from "node:url";
 import { promisify } from "node:util";
@@ -8,6 +15,12 @@ import type { TestFocus, TestPlan } from "./types.js";
 import type {
   AIChat,
   AIChatSummary,
+  AIProviderConfig,
+  AIProviderFeatureMapping,
+  AIProviderFeatureName,
+  AIProviderType,
+  AIProviderUsageLog,
+  AIProviderUsageStatus,
   ActivityLog,
   BillingCycle,
   DashboardStats,
@@ -59,6 +72,13 @@ const defaultPasswordHash =
   "scrypt:demo-aiqa-salt-2026:5db2a0d89de2b4fc506a01ca83b2b01c92a884833ff230d54f8fcb6341b0584a1aa705d10c1e90bf6ff968174cf3ae9c956c75c786a1ed6c08b81dadadfb1856";
 const scrypt = promisify(scryptCallback);
 const trialDurationDays = 14;
+const aiProviderFeatures: AIProviderFeatureName[] = [
+  "test-generation",
+  "ai-chat",
+  "playwright-generation",
+  "requirement-impact",
+  "coverage-score",
+];
 const planCatalog: Plan[] = [
   {
     id: "free",
@@ -215,6 +235,9 @@ const initialDb: ProjectDatabase = {
   histories: [],
   exportHistories: [],
   aiChats: [],
+  aiProviderConfigs: [],
+  aiProviderFeatureMappings: [],
+  aiProviderUsageLogs: [],
   testRuns: [],
   testExecutions: [],
   testExecutionHistories: [],
@@ -236,6 +259,38 @@ function httpError(message: string, statusCode: number) {
   const error = new Error(message);
   (error as Error & { statusCode?: number }).statusCode = statusCode;
   return error;
+}
+
+function encryptionKey() {
+  return createHash("sha256")
+    .update(process.env.AI_PROVIDER_ENCRYPTION_KEY || process.env.JWT_SECRET || "dev-ai-provider-key-change-me")
+    .digest();
+}
+
+function encryptSecret(value: string) {
+  const iv = randomBytes(12);
+  const cipher = createCipheriv("aes-256-gcm", encryptionKey(), iv);
+  const encrypted = Buffer.concat([cipher.update(value, "utf8"), cipher.final()]);
+  const tag = cipher.getAuthTag();
+  return `v1:${iv.toString("base64")}:${tag.toString("base64")}:${encrypted.toString("base64")}`;
+}
+
+export function decryptAIProviderSecret(value?: string) {
+  if (!value) return "";
+  const [version, iv, tag, encrypted] = value.split(":");
+  if (version !== "v1" || !iv || !tag || !encrypted) return "";
+  const decipher = createDecipheriv("aes-256-gcm", encryptionKey(), Buffer.from(iv, "base64"));
+  decipher.setAuthTag(Buffer.from(tag, "base64"));
+  return Buffer.concat([
+    decipher.update(Buffer.from(encrypted, "base64")),
+    decipher.final(),
+  ]).toString("utf8");
+}
+
+function maskSecret(value: string) {
+  if (!value) return "";
+  if (value.length <= 8) return "••••••••";
+  return `${value.slice(0, 4)}••••${value.slice(-4)}`;
 }
 
 async function ensureDbFile() {
@@ -266,6 +321,9 @@ async function readDb(): Promise<ProjectDatabase> {
     activityLogs: db.activityLogs ?? [],
     exportHistories: db.exportHistories ?? [],
     aiChats: (db.aiChats ?? []).map(normalizeChat),
+    aiProviderConfigs: (db.aiProviderConfigs ?? []).map(normalizeAIProviderConfig),
+    aiProviderFeatureMappings: db.aiProviderFeatureMappings ?? [],
+    aiProviderUsageLogs: db.aiProviderUsageLogs ?? [],
     testRuns: db.testRuns ?? [],
     testExecutions: db.testExecutions ?? [],
     testExecutionHistories: db.testExecutionHistories ?? [],
@@ -316,6 +374,45 @@ function normalizeRequirement(requirement: Requirement): Requirement {
 
 function normalizeChat(chat: AIChat): AIChat {
   return { ...chat, workspaceId: chat.workspaceId ?? defaultWorkspaceId };
+}
+
+function normalizeAIProviderConfig(config: AIProviderConfig): AIProviderConfig {
+  const timestamp = config.createdAt ?? now();
+  return {
+    ...config,
+    workspaceId: config.workspaceId ?? defaultWorkspaceId,
+    temperature: config.temperature ?? 0.2,
+    maxTokens: config.maxTokens ?? 4000,
+    isDefault: config.isDefault ?? false,
+    isActive: config.isActive ?? true,
+    fallbackToDefault: config.fallbackToDefault ?? true,
+    createdAt: timestamp,
+    updatedAt: config.updatedAt ?? timestamp,
+  };
+}
+
+function sanitizeAIProvider(config: AIProviderConfig) {
+  const { apiKeyEncrypted: _apiKeyEncrypted, ...safe } = config;
+  return safe;
+}
+
+function defaultAIProvider(workspaceId = defaultWorkspaceId) {
+  return {
+    id: "default-ai-provider",
+    workspaceId,
+    providerType: "default" as AIProviderType,
+    providerName: "AI QA Copilot Default AI",
+    modelName: process.env.GROQ_MODEL ?? "llama-3.3-70b-versatile",
+    apiKeyMasked: "",
+    temperature: 0.2,
+    maxTokens: 4000,
+    isDefault: true,
+    isActive: true,
+    fallbackToDefault: true,
+    createdBy: "AI QA Copilot",
+    createdAt: now(),
+    updatedAt: now(),
+  };
 }
 
 function normalizeUser(user: ProjectDatabase["users"][number]): ProjectDatabase["users"][number] {
@@ -1445,6 +1542,295 @@ export async function recordExportHistory(input: {
 export async function listExportHistory() {
   const db = await readDb();
   return db.exportHistories.sort((a, b) => b.createdAt.localeCompare(a.createdAt));
+}
+
+export async function getWorkspaceIdForProject(projectId?: string) {
+  if (!projectId) return defaultWorkspaceId;
+  const db = await readDb();
+  return db.projects.find((project) => project.id === projectId)?.workspaceId ?? defaultWorkspaceId;
+}
+
+export async function listAIProviders(workspaceId = defaultWorkspaceId) {
+  const db = await readDb();
+  return [
+    defaultAIProvider(workspaceId),
+    ...db.aiProviderConfigs
+      .filter((config) => config.workspaceId === workspaceId)
+      .map(sanitizeAIProvider),
+  ];
+}
+
+export async function getAIProvider(providerId: string) {
+  const db = await readDb();
+  const config = db.aiProviderConfigs.find((item) => item.id === providerId);
+  return config ? sanitizeAIProvider(config) : null;
+}
+
+export async function getAIProviderRuntimeConfig(providerId: string) {
+  const db = await readDb();
+  const config = db.aiProviderConfigs.find((item) => item.id === providerId);
+  return config
+    ? {
+        ...config,
+        apiKey: decryptAIProviderSecret(config.apiKeyEncrypted),
+      }
+    : null;
+}
+
+export async function createAIProvider(input: {
+  workspaceId: string;
+  providerType: AIProviderType;
+  providerName: string;
+  apiKey?: string;
+  baseUrl?: string;
+  modelName: string;
+  endpointUrl?: string;
+  deploymentName?: string;
+  apiVersion?: string;
+  requestFormat?: "OpenAI Compatible";
+  temperature?: number;
+  maxTokens?: number;
+  isActive?: boolean;
+  fallbackToDefault?: boolean;
+  createdBy?: string;
+}) {
+  const db = await readDb();
+  const timestamp = now();
+  const config: AIProviderConfig = {
+    id: createId("ai_provider"),
+    workspaceId: input.workspaceId,
+    providerType: input.providerType,
+    providerName: input.providerName,
+    apiKeyEncrypted: input.apiKey ? encryptSecret(input.apiKey) : undefined,
+    apiKeyMasked: input.apiKey ? maskSecret(input.apiKey) : undefined,
+    baseUrl: input.baseUrl,
+    modelName: input.modelName,
+    endpointUrl: input.endpointUrl,
+    deploymentName: input.deploymentName,
+    apiVersion: input.apiVersion,
+    requestFormat: input.requestFormat,
+    temperature: input.temperature ?? 0.2,
+    maxTokens: input.maxTokens ?? 4000,
+    isDefault: false,
+    isActive: input.isActive ?? true,
+    fallbackToDefault: input.fallbackToDefault ?? true,
+    createdBy: input.createdBy ?? "Current User",
+    createdAt: timestamp,
+    updatedAt: timestamp,
+  };
+  db.aiProviderConfigs.push(config);
+  addActivityLog(db, {
+    workspaceId: input.workspaceId,
+    action: "AI provider created",
+    resourceType: "AIProviderConfig",
+    resourceId: config.id,
+    newValue: { providerType: config.providerType, providerName: config.providerName, modelName: config.modelName },
+  });
+  await writeDb(db);
+  return sanitizeAIProvider(config);
+}
+
+export async function updateAIProvider(providerId: string, input: Partial<{
+  providerType: AIProviderType;
+  providerName: string;
+  apiKey: string;
+  baseUrl: string;
+  modelName: string;
+  endpointUrl: string;
+  deploymentName: string;
+  apiVersion: string;
+  requestFormat: "OpenAI Compatible";
+  temperature: number;
+  maxTokens: number;
+  isActive: boolean;
+  fallbackToDefault: boolean;
+  updatedBy: string;
+}>) {
+  const db = await readDb();
+  const config = db.aiProviderConfigs.find((item) => item.id === providerId);
+  if (!config) return null;
+  if (input.providerType) config.providerType = input.providerType;
+  if (input.providerName !== undefined) config.providerName = input.providerName;
+  if (input.apiKey) {
+    config.apiKeyEncrypted = encryptSecret(input.apiKey);
+    config.apiKeyMasked = maskSecret(input.apiKey);
+  }
+  if (input.baseUrl !== undefined) config.baseUrl = input.baseUrl;
+  if (input.modelName !== undefined) config.modelName = input.modelName;
+  if (input.endpointUrl !== undefined) config.endpointUrl = input.endpointUrl;
+  if (input.deploymentName !== undefined) config.deploymentName = input.deploymentName;
+  if (input.apiVersion !== undefined) config.apiVersion = input.apiVersion;
+  if (input.requestFormat !== undefined) config.requestFormat = input.requestFormat;
+  if (input.temperature !== undefined) config.temperature = input.temperature;
+  if (input.maxTokens !== undefined) config.maxTokens = input.maxTokens;
+  if (input.isActive !== undefined) config.isActive = input.isActive;
+  if (input.fallbackToDefault !== undefined) config.fallbackToDefault = input.fallbackToDefault;
+  config.updatedBy = input.updatedBy;
+  config.updatedAt = now();
+  addActivityLog(db, {
+    workspaceId: config.workspaceId,
+    action: "AI provider updated",
+    resourceType: "AIProviderConfig",
+    resourceId: config.id,
+    newValue: { providerType: config.providerType, providerName: config.providerName, modelName: config.modelName },
+  });
+  await writeDb(db);
+  return sanitizeAIProvider(config);
+}
+
+export async function deleteAIProvider(providerId: string) {
+  const db = await readDb();
+  const config = db.aiProviderConfigs.find((item) => item.id === providerId);
+  if (!config) return false;
+  db.aiProviderConfigs = db.aiProviderConfigs.filter((item) => item.id !== providerId);
+  db.aiProviderFeatureMappings = db.aiProviderFeatureMappings.filter((item) => item.providerId !== providerId);
+  addActivityLog(db, {
+    workspaceId: config.workspaceId,
+    action: "AI provider deleted",
+    resourceType: "AIProviderConfig",
+    resourceId: config.id,
+    oldValue: { providerType: config.providerType, providerName: config.providerName },
+  });
+  await writeDb(db);
+  return true;
+}
+
+export async function setAIProviderStatus(providerId: string, isActive: boolean) {
+  return updateAIProvider(providerId, { isActive });
+}
+
+export async function markAIProviderTestResult(providerId: string, status: AIProviderUsageStatus) {
+  const db = await readDb();
+  const config = db.aiProviderConfigs.find((item) => item.id === providerId);
+  if (!config) return null;
+  config.lastTestedAt = now();
+  config.lastTestStatus = status;
+  config.updatedAt = config.lastTestedAt;
+  await writeDb(db);
+  return sanitizeAIProvider(config);
+}
+
+export async function getAIProviderFeatureMappings(workspaceId = defaultWorkspaceId) {
+  const db = await readDb();
+  return aiProviderFeatures.map((featureName) => {
+    const mapping = db.aiProviderFeatureMappings.find(
+      (item) => item.workspaceId === workspaceId && item.featureName === featureName,
+    );
+    const provider = mapping
+      ? db.aiProviderConfigs.find((config) => config.id === mapping.providerId)
+      : undefined;
+    return {
+      id: mapping?.id ?? `${workspaceId}_${featureName}`,
+      workspaceId,
+      featureName,
+      providerId: mapping?.providerId ?? "default-ai-provider",
+      providerName: provider?.providerName ?? "AI QA Copilot Default AI",
+      providerType: provider?.providerType ?? "default",
+      modelName: mapping?.modelName ?? provider?.modelName ?? process.env.GROQ_MODEL ?? "llama-3.3-70b-versatile",
+      isActive: mapping?.isActive ?? true,
+      updatedAt: mapping?.updatedAt ?? now(),
+    };
+  });
+}
+
+export async function updateAIProviderFeatureMappings(
+  workspaceId: string,
+  mappings: Array<{
+    featureName: AIProviderFeatureName;
+    providerId: string;
+    modelName?: string;
+    isActive?: boolean;
+  }>,
+  updatedBy?: string,
+) {
+  const db = await readDb();
+  const timestamp = now();
+  mappings.forEach((input) => {
+    let mapping = db.aiProviderFeatureMappings.find(
+      (item) => item.workspaceId === workspaceId && item.featureName === input.featureName,
+    );
+    const provider = db.aiProviderConfigs.find((config) => config.id === input.providerId);
+    if (input.providerId === "default-ai-provider") {
+      db.aiProviderFeatureMappings = db.aiProviderFeatureMappings.filter(
+        (item) => !(item.workspaceId === workspaceId && item.featureName === input.featureName),
+      );
+      return;
+    }
+    if (!provider) throw httpError("Selected AI provider was not found.", 404);
+    if (!mapping) {
+      mapping = {
+        id: createId("ai_provider_mapping"),
+        workspaceId,
+        featureName: input.featureName,
+        providerId: input.providerId,
+        modelName: input.modelName || provider.modelName,
+        isActive: input.isActive ?? true,
+        updatedAt: timestamp,
+        updatedBy,
+      };
+      db.aiProviderFeatureMappings.push(mapping);
+    } else {
+      mapping.providerId = input.providerId;
+      mapping.modelName = input.modelName || provider.modelName;
+      mapping.isActive = input.isActive ?? true;
+      mapping.updatedAt = timestamp;
+      mapping.updatedBy = updatedBy;
+    }
+  });
+  addActivityLog(db, {
+    workspaceId,
+    action: "AI provider feature mapping updated",
+    resourceType: "AIProviderFeatureMapping",
+    newValue: { features: mappings.map((mapping) => mapping.featureName) },
+  });
+  await writeDb(db);
+  return getAIProviderFeatureMappings(workspaceId);
+}
+
+export async function resolveAIProviderForFeature(workspaceId: string, featureName: AIProviderFeatureName) {
+  const db = await readDb();
+  const mapping = db.aiProviderFeatureMappings.find(
+    (item) => item.workspaceId === workspaceId && item.featureName === featureName && item.isActive,
+  );
+  const mappedProvider = mapping
+    ? db.aiProviderConfigs.find((config) => config.id === mapping.providerId && config.isActive)
+    : undefined;
+  if (mappedProvider) {
+    return {
+      ...mappedProvider,
+      modelName: mapping?.modelName || mappedProvider.modelName,
+      apiKey: decryptAIProviderSecret(mappedProvider.apiKeyEncrypted),
+    };
+  }
+  const activeProvider = db.aiProviderConfigs.find((config) => config.workspaceId === workspaceId && config.isActive);
+  if (activeProvider) {
+    return {
+      ...activeProvider,
+      apiKey: decryptAIProviderSecret(activeProvider.apiKeyEncrypted),
+    };
+  }
+  return null;
+}
+
+export async function createAIProviderUsageLog(input: Omit<AIProviderUsageLog, "id" | "createdAt">) {
+  const db = await readDb();
+  const log: AIProviderUsageLog = {
+    id: createId("ai_provider_usage"),
+    createdAt: now(),
+    ...input,
+    errorMessage: input.errorMessage?.slice(0, 400),
+  };
+  db.aiProviderUsageLogs.unshift(log);
+  db.aiProviderUsageLogs = db.aiProviderUsageLogs.slice(0, 500);
+  await writeDb(db);
+  return log;
+}
+
+export async function listAIProviderUsage(workspaceId = defaultWorkspaceId) {
+  const db = await readDb();
+  return db.aiProviderUsageLogs
+    .filter((log) => log.workspaceId === workspaceId)
+    .sort((a, b) => b.createdAt.localeCompare(a.createdAt));
 }
 
 export async function listApprovedTestCaseVersions(filters: {

@@ -6,6 +6,7 @@ import { z } from "zod";
 
 import { generateTestPlanWithGroq } from "./groq.js";
 import { aiChatRouter } from "./aiChatRoutes.js";
+import { aiProviderRouter } from "./aiProviderRoutes.js";
 import { analyticsRouter } from "./analyticsRoutes.js";
 import { authRouter } from "./authRoutes.js";
 import { exportRouter } from "./exportRoutes.js";
@@ -15,7 +16,7 @@ import { projectRouter } from "./projectRoutes.js";
 import { reviewRouter } from "./reviewRoutes.js";
 import { testExecutionRouter } from "./testExecutionRoutes.js";
 import { workspaceRouter } from "./workspaceRoutes.js";
-import { assertAIUsageQuota, expireExpiredTrials, saveGenerationHistory } from "./projectStore.js";
+import { assertAIUsageQuota, expireExpiredTrials, getWorkspaceIdForProject, saveGenerationHistory } from "./projectStore.js";
 
 const app = express();
 const port = Number(process.env.PORT ?? 4000);
@@ -78,6 +79,7 @@ app.use("/api", pricingRouter);
 app.use("/api", analyticsRouter);
 app.use("/api", exportRouter);
 app.use("/api", aiChatRouter);
+app.use("/api", aiProviderRouter);
 app.use("/api", reviewRouter);
 app.use("/api", testExecutionRouter);
 app.use("/api", workspaceRouter);
@@ -89,10 +91,11 @@ app.post("/api/generate-testcases", async (request, response) => {
       await assertAIUsageQuota({ projectId: input.projectId, moduleId: input.moduleId, type: "generation" });
     }
 
+    const workspaceId = await getWorkspaceIdForProject(input.projectId);
     const testPlan = await generateTestPlanWithGroq({
       requirement: input.requirement,
       testType: input.testType,
-    });
+    }, { workspaceId, createdBy: request.userId });
 
     if (input.projectId && input.moduleId) {
       const saved = await saveGenerationHistory({
@@ -102,6 +105,7 @@ app.post("/api/generate-testcases", async (request, response) => {
         requirementText: input.requirement,
         testType: input.testType,
         output: testPlan,
+        aiModelUsed: testPlan.aiModelUsed,
         userId: request.userId,
       });
       response.json({ ...testPlan, savedRequirementId: saved?.requirement.id, savedHistoryId: saved?.history.id });

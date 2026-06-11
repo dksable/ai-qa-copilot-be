@@ -30,6 +30,23 @@ export type ReviewAction =
 export type TestRunEnvironment = "QA" | "UAT" | "Staging" | "Production";
 export type TestRunStatus = "Not Started" | "In Progress" | "Completed";
 export type TestExecutionStatus = "Not Executed" | "Passed" | "Failed" | "Blocked" | "Skipped";
+export type AIProviderType =
+  | "default"
+  | "openai"
+  | "anthropic"
+  | "gemini"
+  | "groq"
+  | "azure-openai"
+  | "openrouter"
+  | "custom-openai-compatible";
+export type AIProviderFeatureName =
+  | "test-generation"
+  | "ai-chat"
+  | "playwright-generation"
+  | "requirement-impact"
+  | "coverage-score";
+export type AIProviderRequestFormat = "OpenAI Compatible";
+export type AIProviderUsageStatus = "Success" | "Failed";
 
 export interface User {
   id: string;
@@ -319,6 +336,57 @@ export interface TestExecutionHistory {
   createdAt: string;
 }
 
+export interface AIProviderConfig {
+  id: string;
+  workspaceId: string;
+  providerType: AIProviderType;
+  providerName: string;
+  apiKeyEncrypted?: string;
+  apiKeyMasked?: string;
+  baseUrl?: string;
+  modelName: string;
+  endpointUrl?: string;
+  deploymentName?: string;
+  apiVersion?: string;
+  requestFormat?: AIProviderRequestFormat;
+  temperature: number;
+  maxTokens: number;
+  isDefault: boolean;
+  isActive: boolean;
+  fallbackToDefault: boolean;
+  lastTestedAt?: string;
+  lastTestStatus?: AIProviderUsageStatus;
+  createdBy: string;
+  updatedBy?: string;
+  createdAt: string;
+  updatedAt: string;
+}
+
+export interface AIProviderFeatureMapping {
+  id: string;
+  workspaceId: string;
+  featureName: AIProviderFeatureName;
+  providerId: string;
+  modelName: string;
+  isActive: boolean;
+  updatedAt: string;
+  updatedBy?: string;
+}
+
+export interface AIProviderUsageLog {
+  id: string;
+  workspaceId: string;
+  providerType: AIProviderType;
+  providerName: string;
+  modelName: string;
+  featureName: AIProviderFeatureName;
+  tokenUsage?: number;
+  status: AIProviderUsageStatus;
+  errorMessage?: string;
+  createdBy?: string;
+  createdAt: string;
+}
+
 export interface ProjectSummary extends Project {
   totalModules: number;
   totalRequirements: number;
@@ -416,6 +484,9 @@ export interface ProjectDatabase {
   histories: TestCaseGenerationHistory[];
   exportHistories: ExportHistory[];
   aiChats: AIChat[];
+  aiProviderConfigs: AIProviderConfig[];
+  aiProviderFeatureMappings: AIProviderFeatureMapping[];
+  aiProviderUsageLogs: AIProviderUsageLog[];
   testRuns: TestRun[];
   testExecutions: TestExecution[];
   testExecutionHistories: TestExecutionHistory[];

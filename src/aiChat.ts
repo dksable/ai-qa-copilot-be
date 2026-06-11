@@ -1,12 +1,5 @@
 import type { AIChatMessage, Project, ProjectModule, Requirement, TestCaseHistoryRecord } from "./projectTypes.js";
-
-type GroqChatCompletionResponse = {
-  choices?: Array<{
-    message?: {
-      content?: unknown;
-    };
-  }>;
-};
+import { generateAIContent } from "./aiProviderRouter.js";
 
 export interface AIChatContext {
   project: Project;
@@ -100,13 +93,7 @@ ${skeleton}
 \`\`\``;
 }
 
-export async function generateAIChatResponse(context: AIChatContext, userMessage: string) {
-  const apiKey = process.env.GROQ_API_KEY;
-  if (!apiKey) {
-    throw new Error("GROQ_API_KEY is not configured on the backend.");
-  }
-
-  const model = process.env.GROQ_MODEL ?? "llama-3.3-70b-versatile";
+export async function generateAIChatResponse(context: AIChatContext, userMessage: string, createdBy?: string) {
   const messages = [
     {
       role: "system",
@@ -125,31 +112,13 @@ export async function generateAIChatResponse(context: AIChatContext, userMessage
       role: "user",
       content: userMessage,
     },
-  ];
+  ] satisfies Array<{ role: "system" | "user" | "assistant"; content: string }>;
 
-  const response = await fetch("https://api.groq.com/openai/v1/chat/completions", {
-    method: "POST",
-    headers: {
-      Authorization: `Bearer ${apiKey}`,
-      "Content-Type": "application/json",
-    },
-    body: JSON.stringify({
-      model,
-      messages,
-      temperature: 0.2,
-    }),
+  const result = await generateAIContent({
+    workspaceId: context.project.workspaceId,
+    featureName: isPlaywrightRequest(userMessage) ? "playwright-generation" : "ai-chat",
+    createdBy,
+    messages,
   });
-
-  if (!response.ok) {
-    const errorBody = await response.text();
-    console.error("Groq chat error:", response.status, errorBody);
-    throw new Error("AI chat response failed.");
-  }
-
-  const json = (await response.json()) as GroqChatCompletionResponse;
-  const content = json.choices?.[0]?.message?.content;
-  if (typeof content !== "string") {
-    throw new Error("AI chat response did not include message content.");
-  }
-  return ensurePlaywrightResponse(context, userMessage, content);
+  return ensurePlaywrightResponse(context, userMessage, result.content);
 }

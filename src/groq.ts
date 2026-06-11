@@ -1,16 +1,9 @@
 import { z } from "zod";
 
+import { generateAIContent } from "./aiProviderRouter.js";
 import { generateTestCoverageScoreAnalysis } from "./coverageScore.js";
 import { generateRegressionImpactAnalysis } from "./regressionImpact.js";
 import type { GenerateTestCasesInput, TestCase, TestPlan } from "./types.js";
-
-type GroqChatCompletionResponse = {
-  choices?: Array<{
-    message?: {
-      content?: unknown;
-    };
-  }>;
-};
 
 const PrioritySchema = z.enum(["High", "Medium", "Low"]);
 
@@ -105,56 +98,30 @@ function parseJsonContent(content: string) {
   }
 }
 
-export async function generateTestPlanWithGroq(input: GenerateTestCasesInput): Promise<TestPlan> {
-  const apiKey = process.env.GROQ_API_KEY;
-  if (!apiKey) {
-    throw new Error("GROQ_API_KEY is not configured on the backend.");
-  }
-
-  const model = process.env.GROQ_MODEL ?? "llama-3.3-70b-versatile";
+export async function generateTestPlanWithGroq(
+  input: GenerateTestCasesInput,
+  options: { workspaceId?: string; createdBy?: string } = {},
+): Promise<TestPlan & { aiModelUsed?: string }> {
   const userPrompt = `Test focus: ${input.testType}
 
 Requirement / User Story:
 ${input.requirement}`;
 
-  const response = await fetch("https://api.groq.com/openai/v1/chat/completions", {
-    method: "POST",
-    headers: {
-      Authorization: `Bearer ${apiKey}`,
-      "Content-Type": "application/json",
-    },
-    body: JSON.stringify({
-      model,
+  const result = await generateAIContent({
+    workspaceId: options.workspaceId ?? "workspace_default",
+    featureName: "test-generation",
+    createdBy: options.createdBy,
       messages: [
         { role: "system", content: SYSTEM_PROMPT },
         { role: "user", content: userPrompt },
       ],
-      response_format: { type: "json_object" },
-      temperature: 0.2,
-    }),
+    responseFormatJson: true,
   });
 
-  if (!response.ok) {
-    const errorBody = await response.text();
-    console.error("Groq API error:", response.status, errorBody);
-    if (response.status === 401) {
-      throw new Error("Groq authentication failed. Check GROQ_API_KEY.");
-    }
-    if (response.status === 429) {
-      throw new Error("Groq rate limit reached. Please try again later.");
-    }
-    throw new Error("AI generation failed.");
-  }
-
-  const json = (await response.json()) as GroqChatCompletionResponse;
-  const content = json.choices?.[0]?.message?.content;
-  if (typeof content !== "string") {
-    throw new Error("AI response did not include message content.");
-  }
-
-  const parsed = AiTestPlanSchema.parse(parseJsonContent(content));
+  const parsed = AiTestPlanSchema.parse(parseJsonContent(result.content));
   return {
     ...parsed,
+    aiModelUsed: `${result.providerName} / ${result.modelName}`,
     playwright: buildPlaywrightSkeleton(input, [...parsed.positive, ...parsed.negative]),
     regressionImpact: generateRegressionImpactAnalysis(input.requirement),
     coverageAnalysis: generateTestCoverageScoreAnalysis({
