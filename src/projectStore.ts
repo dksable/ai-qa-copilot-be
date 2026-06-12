@@ -10,6 +10,7 @@ import {
 import path from "node:path";
 import { fileURLToPath } from "node:url";
 import { promisify } from "node:util";
+import { MongoClient, type Collection } from "mongodb";
 
 import type { TestFocus, TestPlan } from "./types.js";
 import type {
@@ -74,6 +75,8 @@ import type {
 const currentDir = path.dirname(fileURLToPath(import.meta.url));
 const dataDir = path.resolve(currentDir, "../data");
 const dbFile = path.join(dataDir, "db.json");
+const mongoDocumentId = "ai-qa-copilot-poc";
+const mongoCollectionName = "project_database";
 const defaultUserId = "default-user";
 const defaultWorkspaceId = "workspace_default";
 const defaultUserEmail = "admin@aiqacopilot.local";
@@ -258,6 +261,13 @@ const initialDb: ProjectDatabase = {
 };
 
 let writeQueue = Promise.resolve();
+let mongoClientPromise: Promise<MongoClient> | null = null;
+
+interface MongoProjectDatabaseDocument {
+  _id: string;
+  data: ProjectDatabase;
+  updatedAt: string;
+}
 
 function now() {
   return new Date().toISOString();
@@ -271,6 +281,50 @@ function httpError(message: string, statusCode: number) {
   const error = new Error(message);
   (error as Error & { statusCode?: number }).statusCode = statusCode;
   return error;
+}
+
+function useMongoStorage() {
+  return Boolean(process.env.MONGODB_URI?.trim());
+}
+
+async function mongoCollection(): Promise<Collection<MongoProjectDatabaseDocument>> {
+  const uri = process.env.MONGODB_URI?.trim();
+  if (!uri) throw new Error("MONGODB_URI is not configured.");
+  mongoClientPromise ??= new MongoClient(uri).connect();
+  const client = await mongoClientPromise;
+  const dbName = process.env.MONGODB_DB_NAME?.trim() || "aiats";
+  return client.db(dbName).collection<MongoProjectDatabaseDocument>(mongoCollectionName);
+}
+
+async function readLocalDbForSeed(): Promise<ProjectDatabase> {
+  try {
+    const raw = await readFile(dbFile, "utf8");
+    return JSON.parse(raw) as ProjectDatabase;
+  } catch {
+    return initialDb;
+  }
+}
+
+async function readMongoDb(): Promise<ProjectDatabase> {
+  const collection = await mongoCollection();
+  const existing = await collection.findOne({ _id: mongoDocumentId });
+  if (existing?.data) return existing.data;
+  const seed = await readLocalDbForSeed();
+  await collection.updateOne(
+    { _id: mongoDocumentId },
+    { $set: { data: seed, updatedAt: now() } },
+    { upsert: true },
+  );
+  return seed;
+}
+
+async function writeMongoDb(db: ProjectDatabase) {
+  const collection = await mongoCollection();
+  await collection.updateOne(
+    { _id: mongoDocumentId },
+    { $set: { data: db, updatedAt: now() } },
+    { upsert: true },
+  );
 }
 
 function encryptionKey() {
@@ -317,10 +371,18 @@ async function ensureDbFile() {
 }
 
 async function readDb(): Promise<ProjectDatabase> {
+  if (useMongoStorage()) {
+    await writeQueue;
+    return normalizeDatabase(await readMongoDb());
+  }
   await ensureDbFile();
   await writeQueue;
   const raw = await readFile(dbFile, "utf8");
   const db = JSON.parse(raw) as ProjectDatabase;
+  return normalizeDatabase(db);
+}
+
+function normalizeDatabase(db: ProjectDatabase): ProjectDatabase {
   const workspaces = db.workspaces?.length ? db.workspaces : initialDb.workspaces;
   const workspaceMembers = db.workspaceMembers?.length ? db.workspaceMembers : initialDb.workspaceMembers;
   return {
@@ -355,7 +417,11 @@ async function readDb(): Promise<ProjectDatabase> {
 }
 
 async function writeDb(db: ProjectDatabase) {
-  writeQueue = writeQueue.then(() => writeFile(dbFile, JSON.stringify(db, null, 2)));
+  writeQueue = writeQueue.then(() =>
+    useMongoStorage()
+      ? writeMongoDb(db)
+      : writeFile(dbFile, JSON.stringify(db, null, 2)),
+  );
   await writeQueue;
 }
 
