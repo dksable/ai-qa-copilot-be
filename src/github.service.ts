@@ -1,11 +1,13 @@
 import type {
   RepositoryAISuggestion,
   RepositoryChangedFile,
+  RepositoryGeneratedUpdate,
   RepositoryImpactedTest,
   RepositoryAnalysisBuildTool,
   RepositoryAnalysisFramework,
   RepositoryAnalysisLanguage,
   RepositoryAnalysisPattern,
+  RepositoryPrPreview,
   RepositoryRiskLevel,
 } from "./projectTypes.js";
 
@@ -76,6 +78,15 @@ function slugify(value: string) {
     .replace(/[^a-z0-9]+/g, "-")
     .replace(/^-+|-+$/g, "")
     .slice(0, 48) || "playwright-tests";
+}
+
+function uniqueGitSuffix() {
+  const timestamp = new Date()
+    .toISOString()
+    .replace(/\.\d{3}Z$/, "")
+    .replace(/[^0-9]/g, "");
+  const random = Math.random().toString(36).slice(2, 7);
+  return `${timestamp}-${random}`;
 }
 
 function titleFromPath(filePath: string) {
@@ -418,6 +429,130 @@ export function generateRepositorySyncSuggestions(input: {
   }];
 }
 
+function buildRepositorySyncUpdateCode(input: {
+  oldCode: string;
+  testFile: string;
+  relatedChangedFile: string;
+  impactReason: string;
+  suggestedAction: string;
+  riskLevel: RepositoryRiskLevel;
+}) {
+  const updateBlock = [
+    "",
+    "",
+    "// AI QA Copilot Repository Sync Beta",
+    `// Impacted by: ${input.relatedChangedFile}`,
+    `// Reason: ${input.impactReason}`,
+    `// Suggested action: ${input.suggestedAction}`,
+    `// Risk: ${input.riskLevel}`,
+    "test.describe('AI QA Copilot repository sync coverage', () => {",
+    `  test('review impacted flow for ${titleFromPath(input.relatedChangedFile)}', async ({ page }) => {`,
+    "    // TODO: Review generated suggestion against the latest application change.",
+    "    // Update locators, assertions, and navigation based on the changed flow.",
+    "    await page.goto('/');",
+    "  });",
+    "});",
+  ].join("\n");
+  if (input.oldCode.trim()) {
+    return `${input.oldCode.trimEnd()}${updateBlock}\n`;
+  }
+  return [
+    "import { test, expect } from '@playwright/test';",
+    "",
+    `test.describe('${titleFromPath(input.testFile)}', () => {`,
+    `  test('covers impacted change from ${titleFromPath(input.relatedChangedFile)}', async ({ page }) => {`,
+    "    await page.goto('/');",
+    "    await expect(page).toHaveURL(/.*/);",
+    "  });",
+    "});",
+  ].join("\n");
+}
+
+export async function generateRepositorySyncUpdates(
+  config: GitHubAutomationConfig,
+  input: {
+    syncId: string;
+    impactedTests: RepositoryImpactedTest[];
+    changedFiles: RepositoryChangedFile[];
+    riskLevel: RepositoryRiskLevel;
+  },
+): Promise<RepositoryGeneratedUpdate[]> {
+  const targets = input.impactedTests.length
+    ? input.impactedTests.slice(0, 8)
+    : input.changedFiles.slice(0, 3).map((file) => ({
+        testFile: normalizePath(config.testFolderPath, `${slugify(file.relatedModule || titleFromPath(file.filePath))}.spec.ts`),
+        relatedChangedFile: file.filePath,
+        impactReason: file.possibleTestImpact,
+        suggestedAction: "Add" as const,
+        confidenceScore: file.riskLevel === "High" ? 72 : 64,
+      }));
+  const createdAt = new Date().toISOString();
+  const updates: RepositoryGeneratedUpdate[] = [];
+  for (const target of targets) {
+    const changedFile = input.changedFiles.find((file) => file.filePath === target.relatedChangedFile);
+    const riskLevel = changedFile?.riskLevel ?? input.riskLevel;
+    const oldCode = await readRepositoryFile(config, target.testFile);
+    const confidenceScore = Math.min(98, Math.max(40, target.confidenceScore));
+    updates.push({
+      id: `repo_update_${slugify(target.testFile)}_${updates.length + 1}`,
+      syncId: input.syncId,
+      testFilePath: target.testFile,
+      oldCode,
+      newCode: buildRepositorySyncUpdateCode({
+        oldCode,
+        testFile: target.testFile,
+        relatedChangedFile: target.relatedChangedFile,
+        impactReason: target.impactReason,
+        suggestedAction: target.suggestedAction,
+        riskLevel,
+      }),
+      impactReason: target.impactReason,
+      changedLocatorOrFlow: `Review flow or locator affected by ${target.relatedChangedFile}`,
+      confidenceScore,
+      riskLevel,
+      suggestedAction: confidenceScore < 70 ? "Needs Manual Review" : target.suggestedAction,
+      createdAt,
+    });
+  }
+  return updates;
+}
+
+export function buildRepositorySyncPrPreview(input: {
+  generatedUpdates: RepositoryGeneratedUpdate[];
+  changedFiles: RepositoryChangedFile[];
+  riskLevel: RepositoryRiskLevel;
+}): RepositoryPrPreview {
+  const branchName = `aiqa/repository-sync-${uniqueGitSuffix()}`;
+  const averageConfidence = input.generatedUpdates.length
+    ? Math.round(input.generatedUpdates.reduce((total, update) => total + update.confidenceScore, 0) / input.generatedUpdates.length)
+    : 0;
+  return {
+    filesToAdd: input.generatedUpdates.filter((update) => !update.oldCode.trim()).map((update) => update.testFilePath),
+    filesToUpdate: input.generatedUpdates.filter((update) => update.oldCode.trim()).map((update) => update.testFilePath),
+    branchName,
+    title: "AI QA Copilot: Update impacted Playwright tests",
+    description: [
+      "This Pull Request was prepared by AI QA Copilot Repository Sync Beta.",
+      "",
+      "Requires QA review before merge.",
+      "",
+      `Risk Level: ${input.riskLevel}`,
+      `Average Confidence: ${averageConfidence}%`,
+      "",
+      "Changed application files:",
+      ...input.changedFiles.slice(0, 20).map((file) => `- ${file.changeType}: \`${file.filePath}\` (${file.riskLevel})`),
+      "",
+      "Impacted test updates:",
+      ...input.generatedUpdates.map((update) => `- \`${update.testFilePath}\`: ${update.suggestedAction} (${update.confidenceScore}% confidence)`),
+      "",
+      "Generated by AI QA Copilot.",
+    ].join("\n"),
+    riskLevel: input.riskLevel,
+    confidenceScore: averageConfidence,
+    createdAt: new Date().toISOString(),
+  };
+}
+
 export async function createRepositorySyncPullRequest(
   config: GitHubAutomationConfig,
   input: {
@@ -427,7 +562,7 @@ export async function createRepositorySyncPullRequest(
     riskLevel: RepositoryRiskLevel;
   },
 ) {
-  const timestamp = new Date().toISOString().replace(/[-:]/g, "").slice(0, 12);
+  const timestamp = uniqueGitSuffix();
   const branchName = `aiqa/repository-sync-${timestamp}`;
   const reportPath = `aiqa-repository-sync/repository-sync-${timestamp}.md`;
   const report = [
@@ -512,7 +647,7 @@ export async function createOrUpdateFile(
     if ((error as GitHubApiError).statusCode !== 404) throw error;
   }
 
-  return githubRequest<{ content: { path: string; html_url: string } }>(
+  return githubRequest<{ content?: { path?: string; html_url?: string } }>(
     config,
     `/repos/${encodeURIComponent(config.owner)}/${encodeURIComponent(config.repo)}/contents/${encodedPath}`,
     {
@@ -521,6 +656,41 @@ export async function createOrUpdateFile(
         message: input.message,
         content: Buffer.from(input.content, "utf8").toString("base64"),
         branch: input.branchName,
+      }),
+    },
+  );
+}
+
+export async function createOrReplaceFile(
+  config: GitHubAutomationConfig,
+  input: {
+    branchName: string;
+    filePath: string;
+    content: string;
+    message: string;
+  },
+) {
+  const encodedPath = input.filePath.split("/").map(encodeURIComponent).join("/");
+  let sha: string | undefined;
+  try {
+    const existing = await githubRequest<{ sha?: string }>(
+      config,
+      `/repos/${encodeURIComponent(config.owner)}/${encodeURIComponent(config.repo)}/contents/${encodedPath}?ref=${encodeURIComponent(input.branchName)}`,
+    );
+    sha = existing.sha;
+  } catch (error) {
+    if ((error as GitHubApiError).statusCode !== 404) throw error;
+  }
+  return githubRequest<{ content?: { path?: string; html_url?: string } }>(
+    config,
+    `/repos/${encodeURIComponent(config.owner)}/${encodeURIComponent(config.repo)}/contents/${encodedPath}`,
+    {
+      method: "PUT",
+      body: JSON.stringify({
+        message: input.message,
+        content: Buffer.from(input.content, "utf8").toString("base64"),
+        branch: input.branchName,
+        ...(sha ? { sha } : {}),
       }),
     },
   );
@@ -553,7 +723,7 @@ export async function pushPlaywrightTestToGitHub(
   config: GitHubAutomationConfig,
   input: PushPlaywrightInput,
 ) {
-  const timestamp = new Date().toISOString().replace(/[-:]/g, "").slice(0, 12);
+  const timestamp = uniqueGitSuffix();
   const branchName = `aiqa/${slugify(input.requirementTitle)}-${timestamp}`;
   const safeFileName = input.fileName.trim().replace(/^\/+/, "");
   const filePath = normalizePath(config.testFolderPath, safeFileName);
@@ -591,7 +761,39 @@ export async function pushPlaywrightTestToGitHub(
   return {
     branchName,
     filePath,
-    fileUrl: file.content.html_url,
+    fileUrl: file.content?.html_url ?? pr.html_url,
+    pullRequestUrl: pr.html_url,
+    pullRequestNumber: pr.number,
+  };
+}
+
+export async function createRepositorySyncUpdatePullRequest(
+  config: GitHubAutomationConfig,
+  input: {
+    preview: RepositoryPrPreview;
+    generatedUpdates: RepositoryGeneratedUpdate[];
+  },
+) {
+  if (!input.generatedUpdates.length) {
+    throw githubError("No generated Playwright updates are available for this sync.", 400);
+  }
+  await createBranch(config, input.preview.branchName);
+  for (const update of input.generatedUpdates) {
+    await createOrReplaceFile(config, {
+      branchName: input.preview.branchName,
+      filePath: update.testFilePath,
+      content: update.newCode,
+      message: `AI QA Copilot: update ${update.testFilePath}`,
+    });
+  }
+  const pr = await createPullRequest(config, {
+    branchName: input.preview.branchName,
+    title: input.preview.title,
+    body: input.preview.description,
+  });
+  return {
+    branchName: input.preview.branchName,
+    updatedFiles: input.generatedUpdates.map((update) => update.testFilePath),
     pullRequestUrl: pr.html_url,
     pullRequestNumber: pr.number,
   };

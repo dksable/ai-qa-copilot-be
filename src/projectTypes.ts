@@ -329,7 +329,16 @@ export interface TestExecution {
   actualResult: string;
   comments: string;
   screenshotUrl?: string;
+  videoUrl?: string;
+  logUrl?: string;
   bugId?: string;
+  jiraBugId?: string;
+  jiraBugUrl?: string;
+  executionTime?: number;
+  browser?: "Chrome" | "Firefox" | "Safari" | "Edge";
+  operatingSystem?: "Windows" | "macOS" | "Linux" | "Android" | "iOS";
+  buildNumber?: string;
+  environment?: TestRunEnvironment;
   executedBy?: string;
   executedAt?: string;
   createdAt: string;
@@ -347,6 +356,8 @@ export interface TestExecutionHistory {
   comment?: string;
   actualResult?: string;
   bugId?: string;
+  jiraBugId?: string;
+  jiraBugUrl?: string;
   createdAt: string;
 }
 
@@ -479,12 +490,42 @@ export interface RepositorySync {
   changedFiles: RepositoryChangedFile[];
   impactedTests: RepositoryImpactedTest[];
   aiSuggestions: RepositoryAISuggestion[];
+  generatedUpdates?: RepositoryGeneratedUpdate[];
+  prPreview?: RepositoryPrPreview;
+  updatedFiles?: string[];
+  branchName?: string;
   riskLevel: RepositoryRiskLevel;
   status: RepositorySyncStatus;
   prUrl?: string;
+  prStatus?: "Not Created" | "Preview Ready" | "Created" | "Failed";
   createdBy: string;
   createdAt: string;
   updatedAt: string;
+}
+
+export interface RepositoryGeneratedUpdate {
+  id: string;
+  syncId: string;
+  testFilePath: string;
+  oldCode: string;
+  newCode: string;
+  impactReason: string;
+  changedLocatorOrFlow: string;
+  confidenceScore: number;
+  riskLevel: RepositoryRiskLevel;
+  suggestedAction: "Update" | "Add" | "Review" | "No Action" | "Needs Manual Review";
+  createdAt: string;
+}
+
+export interface RepositoryPrPreview {
+  filesToAdd: string[];
+  filesToUpdate: string[];
+  branchName: string;
+  title: string;
+  description: string;
+  riskLevel: RepositoryRiskLevel;
+  confidenceScore: number;
+  createdAt: string;
 }
 
 export interface ProjectSummary extends Project {

@@ -39,7 +39,9 @@ import type {
   RepositoryAnalysis,
   RepositoryAISuggestion,
   RepositoryChangedFile,
+  RepositoryGeneratedUpdate,
   RepositoryImpactedTest,
+  RepositoryPrPreview,
   RepositoryRiskLevel,
   RepositorySync,
   Project,
@@ -340,7 +342,7 @@ async function readDb(): Promise<ProjectDatabase> {
     repositoryAnalyses: (db.repositoryAnalyses ?? []).map(normalizeRepositoryAnalysis),
     repositorySyncs: (db.repositorySyncs ?? []).map(normalizeRepositorySync),
     testRuns: db.testRuns ?? [],
-    testExecutions: db.testExecutions ?? [],
+    testExecutions: (db.testExecutions ?? []).map(normalizeTestExecution),
     testExecutionHistories: db.testExecutionHistories ?? [],
     reviewComments: db.reviewComments ?? [],
     reviewAuditTrail: db.reviewAuditTrail ?? [],
@@ -448,10 +450,32 @@ function normalizeRepositorySync(sync: RepositorySync): RepositorySync {
     changedFiles: sync.changedFiles ?? [],
     impactedTests: sync.impactedTests ?? [],
     aiSuggestions: sync.aiSuggestions ?? [],
+    generatedUpdates: sync.generatedUpdates ?? [],
+    updatedFiles: sync.updatedFiles ?? [],
     riskLevel: sync.riskLevel ?? "Low",
     status: sync.status ?? "Completed",
+    prStatus: sync.prStatus ?? (sync.prUrl ? "Created" : sync.prPreview ? "Preview Ready" : "Not Created"),
     createdAt: timestamp,
     updatedAt: sync.updatedAt ?? timestamp,
+  };
+}
+
+function normalizeTestExecution(execution: TestExecution): TestExecution {
+  const timestamp = execution.createdAt ?? now();
+  return {
+    ...execution,
+    actualResult: execution.actualResult ?? "",
+    comments: execution.comments ?? "",
+    screenshotUrl: execution.screenshotUrl ?? "",
+    videoUrl: execution.videoUrl ?? "",
+    logUrl: execution.logUrl ?? "",
+    bugId: execution.bugId ?? "",
+    jiraBugId: execution.jiraBugId ?? execution.bugId ?? "",
+    jiraBugUrl: execution.jiraBugUrl ?? "",
+    executionTime: execution.executionTime ?? 0,
+    buildNumber: execution.buildNumber ?? "",
+    createdAt: timestamp,
+    updatedAt: execution.updatedAt ?? timestamp,
   };
 }
 
@@ -2085,6 +2109,9 @@ export async function createRepositorySync(input: {
     id: createId("repo_sync"),
     provider: "github",
     aiSuggestions: [],
+    generatedUpdates: [],
+    updatedFiles: [],
+    prStatus: "Not Created",
     createdAt: timestamp,
     updatedAt: timestamp,
     status: input.status ?? "Completed",
@@ -2125,6 +2152,47 @@ export async function updateRepositorySyncSuggestions(syncId: string, suggestion
   if (!sync) return null;
   sync.aiSuggestions = suggestions;
   sync.updatedAt = now();
+  await writeDb(db);
+  return sync;
+}
+
+export async function updateRepositorySyncGeneratedUpdates(
+  syncId: string,
+  generatedUpdates: RepositoryGeneratedUpdate[],
+  prPreview: RepositoryPrPreview,
+) {
+  const db = await readDb();
+  const sync = db.repositorySyncs.find((item) => item.id === syncId);
+  if (!sync) return null;
+  sync.generatedUpdates = generatedUpdates;
+  sync.prPreview = prPreview;
+  sync.branchName = prPreview.branchName;
+  sync.updatedFiles = generatedUpdates.map((update) => update.testFilePath);
+  sync.prStatus = "Preview Ready";
+  sync.updatedAt = now();
+  await writeDb(db);
+  return sync;
+}
+
+export async function updateRepositorySyncUpdatePr(
+  syncId: string,
+  input: { prUrl: string; branchName: string; updatedFiles: string[] },
+) {
+  const db = await readDb();
+  const sync = db.repositorySyncs.find((item) => item.id === syncId);
+  if (!sync) return null;
+  sync.prUrl = input.prUrl;
+  sync.branchName = input.branchName;
+  sync.updatedFiles = input.updatedFiles;
+  sync.prStatus = "Created";
+  sync.updatedAt = now();
+  addActivityLog(db, {
+    workspaceId: sync.workspaceId,
+    action: "Repository sync update PR created",
+    resourceType: "RepositorySync",
+    resourceId: sync.id,
+    newValue: { prUrl: input.prUrl, updatedFiles: input.updatedFiles },
+  });
   await writeDb(db);
   return sync;
 }
@@ -2212,6 +2280,8 @@ export async function createTestRun(input: {
   const executions = histories.flatMap((history) => executionRowsFromHistory(history, timestamp));
   executions.forEach((execution) => {
     execution.testRunId = run.id;
+    execution.environment = run.environment;
+    execution.buildNumber = run.buildVersion;
   });
   db.testRuns.push(run);
   db.testExecutions.push(...executions);
@@ -2283,24 +2353,52 @@ export async function updateTestExecutionStatus(
     comments?: string;
     bugId?: string;
     screenshotUrl?: string;
+    videoUrl?: string;
+    logUrl?: string;
+    jiraBugId?: string;
+    jiraBugUrl?: string;
+    executionTime?: number;
+    browser?: TestExecution["browser"];
+    operatingSystem?: TestExecution["operatingSystem"];
+    buildNumber?: string;
+    environment?: TestRunEnvironment;
     updatedBy?: string;
   },
 ) {
   const db = await readDb();
   const execution = db.testExecutions.find((item) => item.id === executionId);
   if (!execution) return null;
-  if (input.status === "Failed" && (!input.actualResult?.trim() || !input.comments?.trim())) {
-    const error = new Error("Actual result and comments are required for failed executions.");
+  const actualResult = input.actualResult ?? execution.actualResult;
+  const comments = input.comments ?? execution.comments;
+  const screenshotUrl = input.screenshotUrl ?? execution.screenshotUrl;
+  const logUrl = input.logUrl ?? execution.logUrl;
+  const jiraBugLink = input.jiraBugUrl ?? execution.jiraBugUrl ?? input.bugId ?? execution.bugId ?? input.jiraBugId ?? execution.jiraBugId;
+  if (input.status === "Failed" && (!actualResult?.trim() || !comments?.trim() || (!screenshotUrl?.trim() && !logUrl?.trim() && !jiraBugLink?.trim()))) {
+    const error = new Error("Actual result, comments, and screenshot/log/Jira bug evidence are required for failed executions.");
+    (error as Error & { statusCode?: number }).statusCode = 400;
+    throw error;
+  }
+  if (input.status === "Blocked" && !comments?.trim()) {
+    const error = new Error("Comments or blocker reason are required for blocked executions.");
     (error as Error & { statusCode?: number }).statusCode = 400;
     throw error;
   }
   const timestamp = now();
   const oldStatus = execution.status;
   execution.status = input.status;
-  execution.actualResult = input.actualResult ?? execution.actualResult;
-  execution.comments = input.comments ?? execution.comments;
+  execution.actualResult = actualResult;
+  execution.comments = comments;
   execution.bugId = input.bugId ?? execution.bugId;
-  execution.screenshotUrl = input.screenshotUrl ?? execution.screenshotUrl;
+  execution.jiraBugId = input.jiraBugId ?? input.bugId ?? execution.jiraBugId;
+  execution.jiraBugUrl = input.jiraBugUrl ?? execution.jiraBugUrl;
+  execution.screenshotUrl = screenshotUrl;
+  execution.videoUrl = input.videoUrl ?? execution.videoUrl;
+  execution.logUrl = logUrl;
+  execution.executionTime = input.executionTime ?? execution.executionTime;
+  execution.browser = input.browser ?? execution.browser;
+  execution.operatingSystem = input.operatingSystem ?? execution.operatingSystem;
+  execution.buildNumber = input.buildNumber ?? execution.buildNumber;
+  execution.environment = input.environment ?? execution.environment;
   execution.executedBy = input.updatedBy ?? execution.executedBy ?? "Current User";
   execution.executedAt = timestamp;
   execution.updatedAt = timestamp;
@@ -2315,6 +2413,8 @@ export async function updateTestExecutionStatus(
     comment: input.comments,
     actualResult: input.actualResult,
     bugId: input.bugId,
+    jiraBugId: input.jiraBugId,
+    jiraBugUrl: input.jiraBugUrl,
     createdAt: timestamp,
   });
   const run = db.testRuns.find((item) => item.id === execution.testRunId);
@@ -2328,12 +2428,54 @@ export async function updateTestExecutionStatus(
 
 export async function updateTestExecutionDetails(
   executionId: string,
-  input: Partial<Pick<TestExecution, "actualResult" | "comments" | "bugId" | "screenshotUrl">>,
+  input: Partial<Pick<TestExecution, "actualResult" | "comments" | "bugId" | "screenshotUrl" | "videoUrl" | "logUrl" | "jiraBugId" | "jiraBugUrl" | "executionTime" | "browser" | "operatingSystem" | "buildNumber" | "environment">>,
 ) {
   const db = await readDb();
   const execution = db.testExecutions.find((item) => item.id === executionId);
   if (!execution) return null;
   Object.assign(execution, input, { updatedAt: now() });
+  await writeDb(db);
+  return execution;
+}
+
+export async function addTestExecutionAttachment(
+  executionId: string,
+  input: { attachmentType: "screenshot" | "video" | "log"; url: string; fileName?: string; mimeType?: string; sizeBytes?: number },
+) {
+  const db = await readDb();
+  const execution = db.testExecutions.find((item) => item.id === executionId);
+  if (!execution) return null;
+  const timestamp = now();
+  if (input.attachmentType === "screenshot") execution.screenshotUrl = input.url;
+  if (input.attachmentType === "video") execution.videoUrl = input.url;
+  if (input.attachmentType === "log") execution.logUrl = input.url;
+  execution.updatedAt = timestamp;
+  db.testExecutionHistories.push({
+    id: createId("execution_history"),
+    testRunId: execution.testRunId,
+    testExecutionId: execution.id,
+    testCaseId: execution.testCaseId,
+    oldStatus: execution.status,
+    newStatus: execution.status,
+    updatedBy: "Current User",
+    comment: `${input.attachmentType} attachment added${input.fileName ? `: ${input.fileName}` : ""}`,
+    createdAt: timestamp,
+  });
+  await writeDb(db);
+  return execution;
+}
+
+export async function deleteTestExecutionAttachment(
+  executionId: string,
+  attachmentId: "screenshot" | "video" | "log",
+) {
+  const db = await readDb();
+  const execution = db.testExecutions.find((item) => item.id === executionId);
+  if (!execution) return null;
+  if (attachmentId === "screenshot") execution.screenshotUrl = "";
+  if (attachmentId === "video") execution.videoUrl = "";
+  if (attachmentId === "log") execution.logUrl = "";
+  execution.updatedAt = now();
   await writeDb(db);
   return execution;
 }
@@ -2361,6 +2503,13 @@ export async function getTestExecutionDashboard() {
   const trendMap = new Map<string, number>();
   db.testExecutionHistories.forEach((history) => increment(trendMap, dateKey(history.createdAt)));
   const testerMap = new Map<string, { total: number; passed: number; failed: number }>();
+  const browserFailureMap = new Map<string, number>();
+  const osFailureMap = new Map<string, number>();
+  const buildPassRateMap = new Map<string, { passed: number; total: number }>();
+  let failedWithEvidence = 0;
+  let linkedToBugs = 0;
+  let executionTimeTotal = 0;
+  let executionTimeCount = 0;
   executions.forEach((execution) => {
     const tester = execution.executedBy || "Unassigned";
     const current = testerMap.get(tester) ?? { total: 0, passed: 0, failed: 0 };
@@ -2368,6 +2517,21 @@ export async function getTestExecutionDashboard() {
     current.passed += execution.status === "Passed" ? 1 : 0;
     current.failed += execution.status === "Failed" ? 1 : 0;
     testerMap.set(tester, current);
+    if (execution.status === "Failed" && (execution.screenshotUrl || execution.logUrl || execution.videoUrl || execution.jiraBugUrl || execution.jiraBugId || execution.bugId)) failedWithEvidence += 1;
+    if (execution.jiraBugUrl || execution.jiraBugId || execution.bugId) linkedToBugs += 1;
+    if (execution.executionTime && execution.executionTime > 0) {
+      executionTimeTotal += execution.executionTime;
+      executionTimeCount += 1;
+    }
+    if (execution.status === "Failed") {
+      if (execution.browser) increment(browserFailureMap, execution.browser);
+      if (execution.operatingSystem) increment(osFailureMap, execution.operatingSystem);
+    }
+    const build = execution.buildNumber || "Unspecified";
+    const buildSummary = buildPassRateMap.get(build) ?? { passed: 0, total: 0 };
+    if (execution.status !== "Not Executed") buildSummary.total += 1;
+    if (execution.status === "Passed") buildSummary.passed += 1;
+    buildPassRateMap.set(build, buildSummary);
   });
   return {
     totalTestRuns: runs.length,
@@ -2386,6 +2550,15 @@ export async function getTestExecutionDashboard() {
     ],
     dailyExecutionTrend: toSeries(trendMap, "executions"),
     testerSummary: [...testerMap.entries()].map(([tester, value]) => ({ tester, ...value })),
+    failedTestsWithEvidence: failedWithEvidence,
+    testsLinkedToBugs: linkedToBugs,
+    averageExecutionTime: executionTimeCount ? Math.round(executionTimeTotal / executionTimeCount) : 0,
+    browserWiseFailures: [...browserFailureMap.entries()].map(([browser, failures]) => ({ browser, failures })),
+    osWiseFailures: [...osFailureMap.entries()].map(([operatingSystem, failures]) => ({ operatingSystem, failures })),
+    buildWisePassRate: [...buildPassRateMap.entries()].map(([buildNumber, value]) => ({
+      buildNumber,
+      passRate: value.total ? Math.round((value.passed / value.total) * 100) : 0,
+    })),
   };
 }
 
@@ -2419,12 +2592,22 @@ export async function exportTestRunReport(testRunId: string, format: "pdf" | "ex
     execution.actualResult,
     execution.comments,
     execution.bugId ?? "",
+    execution.screenshotUrl ?? "",
+    execution.videoUrl ?? "",
+    execution.logUrl ?? "",
+    execution.jiraBugId ?? "",
+    execution.jiraBugUrl ?? "",
+    execution.executionTime ?? "",
+    execution.browser ?? "",
+    execution.operatingSystem ?? "",
+    execution.buildNumber ?? "",
+    execution.environment ?? "",
   ]);
   if (format === "excel") {
     return {
       contentType: "application/vnd.ms-excel",
       filename: `${detail.name.replace(/\W+/g, "-").toLowerCase()}-execution-report.xls`,
-      body: [...rows, [], ["Test Case ID", "Title", "Priority", "Status", "Actual Result", "Comments", "Bug ID"], ...executionRows]
+      body: [...rows, [], ["Test Case ID", "Title", "Priority", "Status", "Actual Result", "Comments", "Bug ID", "Screenshot Link", "Video Link", "Log Link", "Jira Bug ID", "Jira Bug URL", "Execution Time", "Browser", "OS", "Build Number", "Environment"], ...executionRows]
         .map((row) => row.map(csvCell).join(","))
         .join("\n"),
     };
@@ -2436,7 +2619,7 @@ export async function exportTestRunReport(testRunId: string, format: "pdf" | "ex
   return {
     contentType: "text/html",
     filename: `${detail.name.replace(/\W+/g, "-").toLowerCase()}-execution-report.html`,
-    body: `<!doctype html><html><head><meta charset="utf-8"><title>Execution Report</title><style>body{font-family:Arial,sans-serif;padding:24px}table{border-collapse:collapse;width:100%;margin:16px 0}th,td{border:1px solid #ddd;padding:8px;text-align:left;vertical-align:top}th{background:#f5f5f5}</style></head><body><h1>Execution Report</h1><table>${summaryHtml}</table><h2>Execution Details</h2><table><thead><tr><th>Test Case ID</th><th>Title</th><th>Priority</th><th>Status</th><th>Actual Result</th><th>Comments</th><th>Bug ID</th></tr></thead><tbody>${detailsHtml}</tbody></table></body></html>`,
+    body: `<!doctype html><html><head><meta charset="utf-8"><title>Execution Report</title><style>body{font-family:Arial,sans-serif;padding:24px}table{border-collapse:collapse;width:100%;margin:16px 0}th,td{border:1px solid #ddd;padding:8px;text-align:left;vertical-align:top}th{background:#f5f5f5}</style></head><body><h1>Execution Report</h1><table>${summaryHtml}</table><h2>Execution Details</h2><table><thead><tr><th>Test Case ID</th><th>Title</th><th>Priority</th><th>Status</th><th>Actual Result</th><th>Comments</th><th>Bug ID</th><th>Screenshot Link</th><th>Video Link</th><th>Log Link</th><th>Jira Bug ID</th><th>Jira Bug URL</th><th>Execution Time</th><th>Browser</th><th>OS</th><th>Build Number</th><th>Environment</th></tr></thead><tbody>${detailsHtml}</tbody></table></body></html>`,
   };
 }
 

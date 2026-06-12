@@ -3,8 +3,11 @@ import { z } from "zod";
 
 import {
   analyzeGitHubRepository,
+  buildRepositorySyncPrPreview,
   createRepositorySyncPullRequest,
+  createRepositorySyncUpdatePullRequest,
   detectRepositorySyncImpact,
+  generateRepositorySyncUpdates,
   generateRepositorySyncSuggestions,
   getRepoInfo,
   pushPlaywrightTestToGitHub,
@@ -22,7 +25,9 @@ import {
   createRepositorySync,
   saveRepositoryAnalysis,
   saveAutomationRepositoryConfig,
+  updateRepositorySyncGeneratedUpdates,
   updateRepositorySyncPr,
+  updateRepositorySyncUpdatePr,
   updateRepositorySyncSuggestions,
 } from "./projectStore.js";
 import type { WorkspaceRole } from "./projectTypes.js";
@@ -235,6 +240,69 @@ integrationRouter.post("/integrations/github/sync/:syncId/generate-suggestions",
     riskLevel: sync.riskLevel,
   });
   response.json(await updateRepositorySyncSuggestions(sync.id, suggestions));
+}));
+
+integrationRouter.post("/integrations/github/sync/:syncId/generate-updates", asyncRoute(async (request, response) => {
+  const sync = await getRepositorySync(String(request.params.syncId));
+  if (!sync) {
+    response.status(404).json({ message: "Repository sync not found." });
+    return;
+  }
+  if (!(await requireWorkspaceRole(request, response, sync.workspaceId, ["Owner", "Admin", "QA Lead"]))) return;
+  if (!sync.impactedTests.length && !sync.changedFiles.length) {
+    response.status(400).json({ message: "No impacted tests or changed files were found for this sync." });
+    return;
+  }
+  const config = toGitHubConfig(await getAutomationRepositoryRuntimeConfig(sync.workspaceId));
+  const generatedUpdates = await generateRepositorySyncUpdates(config, {
+    syncId: sync.id,
+    impactedTests: sync.impactedTests,
+    changedFiles: sync.changedFiles,
+    riskLevel: sync.riskLevel,
+  });
+  const prPreview = buildRepositorySyncPrPreview({
+    generatedUpdates,
+    changedFiles: sync.changedFiles,
+    riskLevel: sync.riskLevel,
+  });
+  response.json(await updateRepositorySyncGeneratedUpdates(sync.id, generatedUpdates, prPreview));
+}));
+
+integrationRouter.get("/integrations/github/sync/:syncId/pr-preview", asyncRoute(async (request, response) => {
+  const sync = await getRepositorySync(String(request.params.syncId));
+  if (!sync) {
+    response.status(404).json({ message: "Repository sync not found." });
+    return;
+  }
+  if (!(await requireWorkspaceRole(request, response, sync.workspaceId, ["Owner", "Admin", "QA Lead", "QA Engineer"]))) return;
+  if (!sync.prPreview) {
+    response.status(404).json({ message: "Generate Playwright updates before viewing PR preview." });
+    return;
+  }
+  response.json(sync.prPreview);
+}));
+
+integrationRouter.post("/integrations/github/sync/:syncId/create-update-pr", asyncRoute(async (request, response) => {
+  const sync = await getRepositorySync(String(request.params.syncId));
+  if (!sync) {
+    response.status(404).json({ message: "Repository sync not found." });
+    return;
+  }
+  if (!(await requireWorkspaceRole(request, response, sync.workspaceId, ["Owner", "Admin", "QA Lead"]))) return;
+  if (!sync.generatedUpdates?.length || !sync.prPreview) {
+    response.status(400).json({ message: "Generate and review Playwright updates before creating a PR." });
+    return;
+  }
+  const pr = await createRepositorySyncUpdatePullRequest(toGitHubConfig(await getAutomationRepositoryRuntimeConfig(sync.workspaceId)), {
+    generatedUpdates: sync.generatedUpdates,
+    preview: sync.prPreview,
+  });
+  const updated = await updateRepositorySyncUpdatePr(sync.id, {
+    prUrl: pr.pullRequestUrl,
+    branchName: pr.branchName,
+    updatedFiles: pr.updatedFiles,
+  });
+  response.status(201).json({ ...updated, pullRequest: pr });
 }));
 
 integrationRouter.post("/integrations/github/sync/:syncId/create-pr", asyncRoute(async (request, response) => {
