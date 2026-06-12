@@ -292,7 +292,7 @@ async function mongoCollection(): Promise<Collection<MongoProjectDatabaseDocumen
   if (!uri) throw new Error("MONGODB_URI is not configured.");
   mongoClientPromise ??= new MongoClient(uri).connect();
   const client = await mongoClientPromise;
-  const dbName = process.env.MONGODB_DB_NAME?.trim() || "aiats";
+  const dbName = process.env.MONGODB_DB_NAME?.trim() || "ai-qa-copilot";
   return client.db(dbName).collection<MongoProjectDatabaseDocument>(mongoCollectionName);
 }
 
