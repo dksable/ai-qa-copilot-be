@@ -2,10 +2,11 @@ import type {
   RepositoryGeneratedTestUpdate,
   RepositoryImpactAnalysis,
   RepositoryImpactAnalysisTest,
+  RepositoryValidationRecommendation,
   RepositoryValidationRun,
 } from "./projectTypes.js";
 import { spawn } from "node:child_process";
-import { mkdir, rm, writeFile } from "node:fs/promises";
+import { access, cp, mkdir, readFile, readdir, rm, stat, writeFile } from "node:fs/promises";
 import path from "node:path";
 import type { GitHubAutomationConfig } from "./github.service.js";
 import {
@@ -98,6 +99,7 @@ export async function generateRepositoryTestUpdates(input: {
 export async function validateRepositoryTestUpdates(input: {
   impactAnalysis: RepositoryImpactAnalysis;
   updates: RepositoryGeneratedTestUpdate[];
+  automationConfig: GitHubAutomationConfig;
   createdBy?: string;
 }): Promise<Omit<RepositoryValidationRun, "id" | "createdAt">> {
   const started = Date.now();
@@ -115,14 +117,17 @@ export async function validateRepositoryTestUpdates(input: {
       duration: Date.now() - started,
       browser: "chromium",
       environment: "temporary-validation-workspace",
+      command: "npx playwright test --reporter=json,html --workers=1",
       logs: "No approved or edited Playwright updates were available for validation.",
       stdout: "",
       stderr: "",
       failedTestNames: [],
+      failedTests: [],
       errorDetails: "Approve or edit at least one generated test update before running validation.",
       failureExplanation: "Validation did not run because there were no approved proposed test updates.",
       screenshots: [],
       videos: [],
+      traceFiles: [],
       createdBy: input.createdBy,
       completedAt: new Date().toISOString(),
     };
@@ -130,8 +135,17 @@ export async function validateRepositoryTestUpdates(input: {
 
   const runId = `validation-${uniqueSuffix()}`;
   const workspacePath = path.join(process.cwd(), "tmp", "playwright-validation", runId);
-  await createValidationWorkspace(workspacePath, approved);
-  const result = await runPlaywrightValidation(workspacePath);
+  const setup = await createValidationWorkspace(workspacePath, approved, input.automationConfig);
+  if (setup.exitCode !== 0) {
+    return buildFailedSetupRun({
+      impactAnalysis: input.impactAnalysis,
+      workspacePath,
+      setup,
+      started,
+      createdBy: input.createdBy,
+    });
+  }
+  const result = await runPlaywrightValidation(workspacePath, setup.logs, setup.testPaths);
   const duration = Date.now() - started;
   const errorDetails = result.failed > 0 || result.exitCode !== 0
     ? buildValidationErrorDetails(result)
@@ -148,66 +162,88 @@ export async function validateRepositoryTestUpdates(input: {
     duration,
     browser: "chromium",
     environment: "temporary-validation-workspace",
+    command: result.command,
     logs: result.logs,
     stdout: result.stdout,
     stderr: result.stderr,
     failedTestNames: result.failedTestNames,
+    failedTests: result.failedTests,
+    stackTrace: result.stackTrace,
     validationWorkspacePath: workspacePath,
     errorDetails,
     failureExplanation: errorDetails
       ? "Playwright executed the approved updates in an isolated temporary workspace and reported failures. Review stdout, stderr, and failed test names before creating a PR."
       : undefined,
-    screenshots: [],
-    videos: [],
+    screenshots: result.screenshots,
+    videos: result.videos,
+    traceFiles: result.traceFiles,
+    reportUrl: result.reportUrl,
+    jsonReportPath: result.jsonReportPath,
+    htmlReportPath: result.htmlReportPath,
+    jsonReportData: result.jsonReportData,
     createdBy: input.createdBy,
     completedAt: new Date().toISOString(),
   };
 }
 
-async function createValidationWorkspace(workspacePath: string, updates: RepositoryGeneratedTestUpdate[]) {
+async function createValidationWorkspace(
+  workspacePath: string,
+  updates: RepositoryGeneratedTestUpdate[],
+  automationConfig: GitHubAutomationConfig,
+): Promise<{ exitCode: number; stdout: string; stderr: string; logs: string; testPaths: string[] }> {
   await rm(workspacePath, { recursive: true, force: true });
-  await mkdir(workspacePath, { recursive: true });
-  await writeFile(
-    path.join(workspacePath, "package.json"),
-    JSON.stringify({
-      name: "aiqa-playwright-validation",
-      private: true,
-      type: "module",
-      devDependencies: {
-        "@playwright/test": "^1.55.0",
-      },
-      scripts: {
-        test: "playwright test --reporter=json",
-      },
-    }, null, 2),
-  );
-  await writeFile(
-    path.join(workspacePath, "playwright.config.ts"),
-    [
-      "import { defineConfig } from '@playwright/test';",
-      "",
-      "export default defineConfig({",
-      "  testDir: './tests',",
-      "  timeout: 30000,",
-      "  retries: 0,",
-      "  workers: 1,",
-      "  use: {",
-      "    baseURL: process.env.PLAYWRIGHT_BASE_URL || 'http://127.0.0.1:4173',",
-      "    trace: 'retain-on-failure',",
-      "    screenshot: 'only-on-failure',",
-      "    video: 'retain-on-failure',",
-      "  },",
-      "});",
-      "",
-    ].join("\n"),
-  );
+  await mkdir(path.dirname(workspacePath), { recursive: true });
 
+  const localRepoPath = process.env.AIQA_AUTOMATION_REPO_LOCAL_PATH;
+  const setupLogs: string[] = [];
+  if (localRepoPath && await pathExists(localRepoPath)) {
+    await cp(localRepoPath, workspacePath, {
+      recursive: true,
+      filter: (source) => !source.includes(`${path.sep}.git${path.sep}`),
+    });
+    setupLogs.push(`Copied automation repository from local path: ${localRepoPath}`);
+  } else {
+    const cloneUrl = buildGitHubCloneUrl(automationConfig);
+    const clone = await runCommand("git", ["clone", "--depth", "1", "--branch", automationConfig.defaultBranch, cloneUrl, workspacePath], process.cwd(), 180_000, [automationConfig.token]);
+    setupLogs.push(buildCommandFailureLogs(`git clone --depth 1 --branch ${automationConfig.defaultBranch} https://github.com/${automationConfig.owner}/${automationConfig.repo}.git`, clone));
+    if (clone.exitCode !== 0) {
+      return { exitCode: clone.exitCode, stdout: clone.stdout, stderr: clone.stderr, logs: setupLogs.join("\n\n"), testPaths: [] };
+    }
+  }
+
+  if (!await isPlaywrightProject(workspacePath)) {
+    return {
+      exitCode: 1,
+      stdout: "",
+      stderr: "Automation repository is not a valid Playwright project.",
+      logs: [
+        ...setupLogs,
+        "Automation repository is not a valid Playwright project.",
+        "Expected package.json with @playwright/test or playwright config file.",
+      ].join("\n\n"),
+      testPaths: [],
+    };
+  }
+
+  const testPaths: string[] = [];
   for (const update of updates) {
     const safePath = normalizeValidationTestPath(update.testFilePath);
     const destination = path.join(workspacePath, safePath);
     await mkdir(path.dirname(destination), { recursive: true });
     await writeFile(destination, sanitizePlaywrightCode(update.newCode), "utf8");
+    testPaths.push(safePath);
   }
+
+  return {
+    exitCode: 0,
+    stdout: "",
+    stderr: "",
+    logs: [
+      ...setupLogs,
+      `Applied ${updates.length} approved Playwright test update(s) into isolated automation repository copy.`,
+    ].join("\n\n"),
+    testPaths,
+  };
 }
 
 function normalizeValidationTestPath(filePath: string) {
@@ -235,20 +271,172 @@ function sanitizePlaywrightCode(code: string) {
   return trimmed.endsWith("\n") ? trimmed : `${trimmed}\n`;
 }
 
-function runPlaywrightValidation(workspacePath: string): Promise<{
+function runPlaywrightValidation(workspacePath: string, setupLogs = "", testPaths: string[] = []): Promise<{
   exitCode: number;
   totalTests: number;
   passed: number;
   failed: number;
   skipped: number;
+  command: string;
   stdout: string;
   stderr: string;
   logs: string;
   failedTestNames: string[];
+  failedTests: NonNullable<RepositoryValidationRun["failedTests"]>;
+  stackTrace?: string;
+  screenshots: string[];
+  videos: string[];
+  traceFiles: string[];
+  reportUrl?: string;
+  jsonReportPath?: string;
+  htmlReportPath?: string;
+  jsonReportData?: unknown;
 }> {
+  const command = `npx playwright test ${testPaths.join(" ")} --reporter=json,html --workers=1`.replace(/\s+/g, " ").trim();
   return new Promise((resolve) => {
-    const child = spawn("npx", ["playwright", "test", "--reporter=json", "--workers=1"], {
-      cwd: workspacePath,
+    void (async () => {
+      let dependencyInstall = { exitCode: 0, stdout: "", stderr: "", duration: 0 };
+      if (!await pathExists(path.join(workspacePath, "node_modules", "@playwright", "test"))) {
+        dependencyInstall = await runCommand("npm", ["install", "--no-audit", "--no-fund", "--silent"], workspacePath, 180_000);
+      }
+      if (dependencyInstall.exitCode !== 0) {
+        const logs = [
+          setupLogs,
+          buildCommandFailureLogs("npm install --no-audit --no-fund --silent", dependencyInstall),
+        ].filter(Boolean).join("\n\n");
+        resolve({
+          exitCode: dependencyInstall.exitCode,
+          totalTests: 0,
+          passed: 0,
+          failed: 1,
+          skipped: 0,
+          command,
+          stdout: dependencyInstall.stdout,
+          stderr: dependencyInstall.stderr,
+          logs,
+          failedTestNames: ["Playwright dependency installation"],
+          failedTests: [{
+            testFile: "package.json",
+            testName: "Playwright dependency installation",
+            errorMessage: dependencyInstall.stderr || dependencyInstall.stdout || "npm install failed.",
+            duration: dependencyInstall.duration,
+            suggestedAction: "Ensure backend runtime can install @playwright/test or preinstall Playwright in the validation environment.",
+            stackTrace: dependencyInstall.stderr,
+          }],
+          stackTrace: dependencyInstall.stderr,
+          screenshots: [],
+          videos: [],
+          traceFiles: [],
+        });
+        return;
+      }
+
+      let browserInstall = { exitCode: 0, stdout: "", stderr: "", duration: 0 };
+      if (!process.env.PLAYWRIGHT_SKIP_BROWSER_INSTALL) {
+        browserInstall = await runCommand("npx", ["playwright", "install"], workspacePath, 180_000);
+      }
+      if (browserInstall.exitCode !== 0) {
+        const logs = [
+          setupLogs,
+          dependencyInstall.stdout ? `npm install output:\n${dependencyInstall.stdout}` : "",
+          buildCommandFailureLogs("npx playwright install", browserInstall),
+        ].filter(Boolean).join("\n\n");
+        resolve({
+          exitCode: browserInstall.exitCode,
+          totalTests: 0,
+          passed: 0,
+          failed: 1,
+          skipped: 0,
+          command,
+          stdout: browserInstall.stdout,
+          stderr: browserInstall.stderr,
+          logs,
+          failedTestNames: ["Playwright browser installation"],
+          failedTests: [{
+            testFile: "playwright.config",
+            testName: "Playwright browser installation",
+            errorMessage: browserInstall.stderr || browserInstall.stdout || "npx playwright install failed.",
+            duration: browserInstall.duration,
+            suggestedAction: "Install Playwright browsers on the validation runner or set up a pre-baked runner image.",
+            stackTrace: browserInstall.stderr,
+          }],
+          stackTrace: browserInstall.stderr,
+          screenshots: [],
+          videos: [],
+          traceFiles: [],
+        });
+        return;
+      }
+
+      const test = await runCommand("npx", ["playwright", "test", ...testPaths, "--reporter=json,html", "--workers=1"], workspacePath, 180_000);
+      const parsed = await parsePlaywrightJson(test.stdout, workspacePath);
+      const artifacts = await collectValidationArtifacts(workspacePath);
+      const exitCode = test.exitCode;
+      resolve({
+        command,
+        exitCode,
+        totalTests: parsed.totalTests,
+        passed: parsed.passed,
+        failed: parsed.failed || (exitCode !== 0 && parsed.totalTests === 0 ? 1 : parsed.failed),
+        skipped: parsed.skipped,
+        stdout: test.stdout,
+        stderr: test.stderr,
+        logs: [
+          setupLogs,
+          dependencyInstall.stdout ? `npm install output:\n${dependencyInstall.stdout}` : "",
+          browserInstall.stdout ? `playwright install output:\n${browserInstall.stdout}` : "",
+          buildValidationLogs({ stdout: test.stdout, stderr: test.stderr, parsed, exitCode }),
+        ].filter(Boolean).join("\n\n"),
+        failedTestNames: parsed.failedTestNames,
+        failedTests: parsed.failedTests,
+        stackTrace: parsed.stackTrace || test.stderr,
+        screenshots: artifacts.screenshots,
+        videos: artifacts.videos,
+        traceFiles: artifacts.traceFiles,
+        reportUrl: artifacts.htmlReportPath ? `/api/playwright-validation/${path.basename(workspacePath)}/report` : undefined,
+        jsonReportPath: parsed.jsonReportPath,
+        htmlReportPath: artifacts.htmlReportPath,
+        jsonReportData: parsed.jsonReportData,
+      });
+    })().catch((error) => {
+      resolve({
+        exitCode: 1,
+        totalTests: 0,
+        passed: 0,
+        failed: 1,
+        skipped: 0,
+        command,
+        stdout: "",
+        stderr: error instanceof Error ? error.message : "Playwright validation failed.",
+        logs: error instanceof Error ? error.message : "Playwright validation failed.",
+        failedTestNames: ["Playwright validation runner"],
+        failedTests: [{
+          testFile: "validation-runner",
+          testName: "Playwright validation runner",
+          errorMessage: error instanceof Error ? error.message : "Playwright validation failed.",
+          duration: 0,
+          suggestedAction: "Review backend validation runner logs and retry validation.",
+          stackTrace: error instanceof Error ? error.stack : undefined,
+        }],
+        stackTrace: error instanceof Error ? error.stack : undefined,
+        screenshots: [],
+        videos: [],
+        traceFiles: [],
+      });
+    });
+  });
+}
+
+function runCommand(command: string, args: string[], cwd: string, timeoutMs: number, redactions: string[] = []): Promise<{
+  exitCode: number;
+  stdout: string;
+  stderr: string;
+  duration: number;
+}> {
+  const started = Date.now();
+  return new Promise((resolve) => {
+    const child = spawn(command, args, {
+      cwd,
       env: {
         ...process.env,
         CI: "1",
@@ -258,6 +446,10 @@ function runPlaywrightValidation(workspacePath: string): Promise<{
     });
     let stdout = "";
     let stderr = "";
+    const timeout = setTimeout(() => {
+      stderr += `\nCommand timed out after ${timeoutMs / 1000}s.`;
+      child.kill("SIGTERM");
+    }, timeoutMs);
     child.stdout.on("data", (chunk) => {
       stdout += chunk.toString();
     });
@@ -265,50 +457,148 @@ function runPlaywrightValidation(workspacePath: string): Promise<{
       stderr += chunk.toString();
     });
     child.on("error", (error) => {
+      clearTimeout(timeout);
       resolve({
         exitCode: 1,
-        totalTests: 0,
-        passed: 0,
-        failed: 1,
-        skipped: 0,
-        stdout,
-        stderr: `${stderr}\n${error.message}`.trim(),
-        logs: `Failed to start Playwright validation command.\n${error.message}`,
-        failedTestNames: ["Playwright validation command"],
+        stdout: redactSecrets(stdout, redactions),
+        stderr: redactSecrets(`${stderr}\n${error.message}`.trim(), redactions),
+        duration: Date.now() - started,
       });
     });
     child.on("close", (code) => {
-      const parsed = parsePlaywrightJson(stdout);
-      const exitCode = typeof code === "number" ? code : 1;
+      clearTimeout(timeout);
       resolve({
-        exitCode,
-        totalTests: parsed.totalTests,
-        passed: parsed.passed,
-        failed: parsed.failed || (exitCode !== 0 && parsed.totalTests === 0 ? 1 : parsed.failed),
-        skipped: parsed.skipped,
-        stdout,
-        stderr,
-        logs: buildValidationLogs({ stdout, stderr, parsed, exitCode }),
-        failedTestNames: parsed.failedTestNames,
+        exitCode: typeof code === "number" ? code : 1,
+        stdout: redactSecrets(stdout, redactions),
+        stderr: redactSecrets(stderr, redactions),
+        duration: Date.now() - started,
       });
     });
   });
 }
 
-function parsePlaywrightJson(stdout: string) {
-  const empty = { totalTests: 0, passed: 0, failed: 0, skipped: 0, failedTestNames: [] as string[] };
+function buildGitHubCloneUrl(config: GitHubAutomationConfig) {
+  return `https://x-access-token:${encodeURIComponent(config.token)}@github.com/${config.owner}/${config.repo}.git`;
+}
+
+async function isPlaywrightProject(workspacePath: string) {
+  const hasConfig = await pathExists(path.join(workspacePath, "playwright.config.ts")) || await pathExists(path.join(workspacePath, "playwright.config.js"));
+  if (hasConfig) return true;
+  try {
+    const pkg = JSON.parse(await readFile(path.join(workspacePath, "package.json"), "utf8"));
+    return Boolean(pkg.dependencies?.["@playwright/test"] || pkg.devDependencies?.["@playwright/test"] || pkg.dependencies?.playwright || pkg.devDependencies?.playwright);
+  } catch {
+    return false;
+  }
+}
+
+async function pathExists(filePath: string) {
+  try {
+    await access(filePath);
+    return true;
+  } catch {
+    return false;
+  }
+}
+
+function redactSecrets(value: string, secrets: string[]) {
+  return secrets.reduce((text, secret) => secret ? text.split(secret).join("[REDACTED]") : text, value);
+}
+
+function buildFailedSetupRun(input: {
+  impactAnalysis: RepositoryImpactAnalysis;
+  workspacePath: string;
+  setup: { exitCode: number; stdout: string; stderr: string; logs: string };
+  started: number;
+  createdBy?: string;
+}): Omit<RepositoryValidationRun, "id" | "createdAt"> {
+  const invalidProject = input.setup.stderr.includes("not a valid Playwright project");
+  return {
+    workspaceId: input.impactAnalysis.workspaceId,
+    projectId: input.impactAnalysis.projectId,
+    impactAnalysisId: input.impactAnalysis.id,
+    status: "Failed",
+    totalTests: 0,
+    passed: 0,
+    failed: 1,
+    skipped: 0,
+    duration: Date.now() - input.started,
+    browser: "chromium",
+    environment: "temporary-validation-workspace",
+    command: "git clone automation repository",
+    logs: input.setup.logs,
+    stdout: input.setup.stdout,
+    stderr: input.setup.stderr,
+    failedTestNames: [invalidProject ? "Invalid Playwright project" : "Automation repository setup"],
+    failedTests: [{
+      testFile: invalidProject ? "playwright.config.ts" : "automation repository",
+      testName: invalidProject ? "Automation repository validation" : "Automation repository setup",
+      errorMessage: input.setup.stderr || input.setup.logs,
+      duration: Date.now() - input.started,
+      suggestedAction: invalidProject
+        ? "Configure the automation repository with package.json and playwright.config.ts/js before running validation."
+        : "Verify GitHub automation repository access, default branch, and token permissions.",
+      stackTrace: input.setup.stderr,
+    }],
+    stackTrace: input.setup.stderr,
+    validationWorkspacePath: input.workspacePath,
+    errorDetails: invalidProject
+      ? "Automation repository is not a valid Playwright project."
+      : "Unable to prepare automation repository validation workspace.",
+    failureExplanation: invalidProject
+      ? "Validation did not run because the connected automation repository is missing Playwright configuration or dependencies."
+      : "Validation did not run because the automation repository could not be cloned or copied into the temporary workspace.",
+    screenshots: [],
+    videos: [],
+    traceFiles: [],
+    createdBy: input.createdBy,
+    completedAt: new Date().toISOString(),
+  };
+}
+
+async function parsePlaywrightJson(stdout: string, workspacePath: string) {
+  const empty = {
+    totalTests: 0,
+    passed: 0,
+    failed: 0,
+    skipped: 0,
+    failedTestNames: [] as string[],
+    failedTests: [] as NonNullable<RepositoryValidationRun["failedTests"]>,
+    stackTrace: undefined as string | undefined,
+    jsonReportPath: undefined as string | undefined,
+    jsonReportData: undefined as unknown,
+  };
   const json = extractJson(stdout);
   if (!json) return empty;
   try {
     const report = JSON.parse(json);
+    const jsonReportPath = path.join(workspacePath, "playwright-report.json");
+    await writeFile(jsonReportPath, JSON.stringify(report, null, 2));
     const stats = report.stats ?? {};
     const failedTestNames: string[] = [];
+    const failedTests: NonNullable<RepositoryValidationRun["failedTests"]> = [];
+    let stackTrace: string | undefined;
     const walkSuites = (suites: any[] = []) => {
       for (const suite of suites) {
         for (const spec of suite.specs ?? []) {
           for (const test of spec.tests ?? []) {
-            const failed = (test.results ?? []).some((result: any) => result.status === "failed" || result.status === "timedOut" || result.status === "interrupted");
-            if (failed) failedTestNames.push(spec.title ?? test.title ?? "Unnamed Playwright test");
+            for (const result of test.results ?? []) {
+              const failed = result.status === "failed" || result.status === "timedOut" || result.status === "interrupted";
+              if (!failed) continue;
+              const testName = spec.title ?? test.title ?? "Unnamed Playwright test";
+              const errorMessage = result.error?.message ?? result.errors?.[0]?.message ?? "Playwright test failed.";
+              const resultStack = result.error?.stack ?? result.errors?.[0]?.stack;
+              stackTrace = stackTrace ?? resultStack;
+              failedTestNames.push(testName);
+              failedTests.push({
+                testFile: spec.file ?? suite.file ?? "unknown",
+                testName,
+                errorMessage,
+                duration: Number(result.duration ?? 0),
+                suggestedAction: "Review locator, page flow, test data, and expected result before creating the pull request.",
+                stackTrace: resultStack,
+              });
+            }
           }
         }
         walkSuites(suite.suites ?? []);
@@ -322,6 +612,10 @@ function parsePlaywrightJson(stdout: string) {
       failed: Number(stats.unexpected ?? 0),
       skipped: Number(stats.skipped ?? 0),
       failedTestNames,
+      failedTests,
+      stackTrace,
+      jsonReportPath,
+      jsonReportData: report,
     };
   } catch {
     return empty;
@@ -338,11 +632,12 @@ function extractJson(value: string) {
 function buildValidationLogs(input: {
   stdout: string;
   stderr: string;
-  parsed: ReturnType<typeof parsePlaywrightJson>;
+  parsed: Awaited<ReturnType<typeof parsePlaywrightJson>>;
   exitCode: number;
+  installOutput?: string;
 }) {
   const summary = [
-    `Command: npx playwright test --reporter=json --workers=1`,
+    `Command: npx playwright test --reporter=json,html --workers=1`,
     `Exit code: ${input.exitCode}`,
     `Total: ${input.parsed.totalTests}`,
     `Passed: ${input.parsed.passed}`,
@@ -351,6 +646,9 @@ function buildValidationLogs(input: {
   ];
   if (input.parsed.failedTestNames.length) {
     summary.push("", "Failed tests:", ...input.parsed.failedTestNames.map((name) => `- ${name}`));
+  }
+  if (input.parsed.jsonReportPath) {
+    summary.push("", `JSON report: ${input.parsed.jsonReportPath}`);
   }
   if (input.stderr.trim()) {
     summary.push("", "stderr:", input.stderr.trim());
@@ -361,9 +659,18 @@ function buildValidationLogs(input: {
   return summary.join("\n");
 }
 
+function buildCommandFailureLogs(command: string, result: { exitCode: number; stdout: string; stderr: string }) {
+  return [
+    `Command: ${command}`,
+    `Exit code: ${result.exitCode}`,
+    result.stderr ? `stderr:\n${result.stderr}` : "",
+    result.stdout ? `stdout:\n${result.stdout}` : "",
+  ].filter(Boolean).join("\n\n");
+}
+
 function buildValidationErrorDetails(result: Awaited<ReturnType<typeof runPlaywrightValidation>>) {
-  if (result.failedTestNames.length) {
-    return `Playwright validation failed for: ${result.failedTestNames.join(", ")}`;
+  if (result.failedTests.length) {
+    return result.failedTests.map((test) => `${test.testName}: ${test.errorMessage}`).join("\n");
   }
   if (result.stderr.trim()) {
     return result.stderr.trim().split(/\r?\n/).slice(0, 4).join("\n");
@@ -371,12 +678,52 @@ function buildValidationErrorDetails(result: Awaited<ReturnType<typeof runPlaywr
   return "Playwright validation command completed with a failing exit code.";
 }
 
+async function collectValidationArtifacts(workspacePath: string) {
+  const files = await walkFiles(workspacePath);
+  const relative = (file: string) => path.relative(workspacePath, file).replace(/\\/g, "/");
+  const screenshots = files.filter((file) => /\.(png|jpg|jpeg)$/i.test(file)).map(relative);
+  const videos = files.filter((file) => /\.(webm|mp4)$/i.test(file)).map(relative);
+  const traceFiles = files.filter((file) => /\.zip$/i.test(file) || /trace/i.test(file)).map(relative);
+  const htmlReportPath = files.find((file) => relative(file) === "playwright-report/index.html");
+  return {
+    screenshots,
+    videos,
+    traceFiles,
+    htmlReportPath,
+  };
+}
+
+async function walkFiles(root: string): Promise<string[]> {
+  try {
+    const entries = await readdir(root);
+    const files: string[] = [];
+    for (const entry of entries) {
+      if (entry === "node_modules") continue;
+      const fullPath = path.join(root, entry);
+      const info = await stat(fullPath);
+      if (info.isDirectory()) {
+        files.push(...await walkFiles(fullPath));
+      } else {
+        files.push(fullPath);
+      }
+    }
+    return files;
+  } catch {
+    return [];
+  }
+}
+
 export function buildFailureSuggestion(run: RepositoryValidationRun) {
   if (run.failed === 0) return "Validation passed. No fix suggestion is required.";
+  const failedTests = (run.failedTests ?? []).slice(0, 3).map((test) => {
+    const reason = test.errorMessage.split(/\r?\n/)[0];
+    return `- ${test.testName}: ${reason}`;
+  });
   return [
-    "Review failing update files for missing assertions, placeholder selectors, or incomplete navigation.",
-    "Prefer resilient locators such as getByRole, getByLabel, or getByTestId.",
-    "Regenerate or edit the proposed code before creating the pull request.",
+    "AI QA Copilot reviewed the Playwright validation failure.",
+    failedTests.length ? `Likely failing areas:\n${failedTests.join("\n")}` : "The validation command failed before Playwright could report individual test failures.",
+    "Possible causes include changed application flow, missing running app/baseURL, locator mismatch, unavailable browser binaries, or test data drift.",
+    "Recommended next action: review stdout/stderr, update resilient locators such as getByRole/getByLabel/getByTestId, then regenerate or edit the proposed code before creating the pull request.",
   ].join(" ");
 }
 
@@ -385,6 +732,7 @@ export async function createImpactUpdatePullRequest(input: {
   automationConfig: GitHubAutomationConfig;
   approvedUpdates: RepositoryGeneratedTestUpdate[];
   validationRun?: RepositoryValidationRun | null;
+  validationRecommendation?: RepositoryValidationRecommendation | null;
 }) {
   const branchName = `aiqa/impact-update-${uniqueSuffix()}`;
   await createBranch(input.automationConfig, branchName);
@@ -418,8 +766,35 @@ export async function createImpactUpdatePullRequest(input: {
       "",
       "Validation summary:",
       input.validationRun
-        ? `- Status: ${input.validationRun.status}; Passed: ${input.validationRun.passed}; Failed: ${input.validationRun.failed}; Skipped: ${input.validationRun.skipped}`
+        ? [
+          `- Status: ${input.validationRun.status}`,
+          `- Total Tests: ${input.validationRun.totalTests}`,
+          `- Passed: ${input.validationRun.passed}`,
+          `- Failed: ${input.validationRun.failed}`,
+          `- Skipped: ${input.validationRun.skipped}`,
+          `- Duration: ${input.validationRun.duration}ms`,
+        ].join("\n")
         : "- Validation was not run.",
+      "",
+      "AI Validation Recommendation:",
+      input.validationRecommendation
+        ? [
+          `- Confidence Score: ${input.validationRecommendation.confidenceScore}%`,
+          `- Risk Level: ${input.validationRecommendation.riskLevel}`,
+          `- Release Recommendation: ${input.validationRecommendation.releaseRecommendation}`,
+          `- Merge Decision: ${input.validationRecommendation.mergeDecision}`,
+          "",
+          `Summary: ${input.validationRecommendation.summary}`,
+          "",
+          "Reasons:",
+          ...input.validationRecommendation.reasons.map((reason) => `- ${reason}`),
+          "",
+          "Recommended Actions:",
+          ...input.validationRecommendation.recommendedActions.map((action) => `- ${action}`),
+          "",
+          `QA Owner Action: ${input.validationRecommendation.qaOwnerAction}`,
+        ].join("\n")
+        : "- AI validation recommendation was not generated.",
       "",
       "Requires QA review before merge.",
     ].join("\n"),

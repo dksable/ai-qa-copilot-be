@@ -50,6 +50,7 @@ import type {
   RepositoryGeneratedTestUpdateStatus,
   RepositoryUpdatePullRequest,
   RepositoryValidationRun,
+  RepositoryValidationRecommendation,
   RepositoryAISuggestion,
   RepositoryChangedFile,
   RepositoryGeneratedUpdate,
@@ -105,6 +106,7 @@ const aiProviderFeatures: AIProviderFeatureName[] = [
   "repository-impact",
   "repository-test-update",
   "playwright-validation-failure",
+  "ai-validation-recommendation",
   "repository-fix-suggestion",
 ];
 const planCatalog: Plan[] = [
@@ -272,6 +274,7 @@ const initialDb: ProjectDatabase = {
   repositoryImpactAnalyses: [],
   repositoryGeneratedTestUpdates: [],
   repositoryValidationRuns: [],
+  repositoryValidationRecommendations: [],
   repositoryUpdatePullRequests: [],
   repositoryAnalyses: [],
   repositorySyncs: [],
@@ -429,6 +432,7 @@ function normalizeDatabase(db: ProjectDatabase): ProjectDatabase {
     repositoryImpactAnalyses: (db.repositoryImpactAnalyses ?? []).map(normalizeRepositoryImpactAnalysis),
     repositoryGeneratedTestUpdates: (db.repositoryGeneratedTestUpdates ?? []).map(normalizeRepositoryGeneratedTestUpdate),
     repositoryValidationRuns: (db.repositoryValidationRuns ?? []).map(normalizeRepositoryValidationRun),
+    repositoryValidationRecommendations: (db.repositoryValidationRecommendations ?? []).map(normalizeRepositoryValidationRecommendation),
     repositoryUpdatePullRequests: db.repositoryUpdatePullRequests ?? [],
     repositoryAnalyses: (db.repositoryAnalyses ?? []).map(normalizeRepositoryAnalysis),
     repositorySyncs: (db.repositorySyncs ?? []).map(normalizeRepositorySync),
@@ -587,9 +591,34 @@ function normalizeRepositoryValidationRun(run: RepositoryValidationRun): Reposit
     browser: run.browser ?? "chromium",
     environment: run.environment ?? "temporary-workspace",
     logs: run.logs ?? "",
+    stdout: run.stdout ?? "",
+    stderr: run.stderr ?? "",
+    failedTestNames: run.failedTestNames ?? [],
+    failedTests: run.failedTests ?? [],
     screenshots: run.screenshots ?? [],
     videos: run.videos ?? [],
+    traceFiles: run.traceFiles ?? [],
     createdAt: timestamp,
+  };
+}
+
+function normalizeRepositoryValidationRecommendation(recommendation: RepositoryValidationRecommendation): RepositoryValidationRecommendation {
+  const timestamp = recommendation.createdAt ?? now();
+  return {
+    ...recommendation,
+    confidenceScore: recommendation.confidenceScore ?? 0,
+    releaseRecommendation: recommendation.releaseRecommendation ?? "Merge with Caution",
+    riskLevel: recommendation.riskLevel ?? "Medium",
+    summary: recommendation.summary ?? "",
+    reasons: recommendation.reasons ?? [],
+    recommendedActions: recommendation.recommendedActions ?? [],
+    mergeDecision: recommendation.mergeDecision ?? "Warning",
+    qaOwnerAction: recommendation.qaOwnerAction ?? "Review validation result before creating a pull request.",
+    aiProvider: recommendation.aiProvider ?? "AI QA Copilot Default AI",
+    aiModel: recommendation.aiModel ?? process.env.GROQ_MODEL ?? "llama-3.3-70b-versatile",
+    status: recommendation.status ?? "Generated",
+    createdAt: timestamp,
+    updatedAt: recommendation.updatedAt ?? timestamp,
   };
 }
 
@@ -2521,6 +2550,44 @@ export async function getLatestRepositoryValidationRun(impactAnalysisId: string)
   const db = await readDb();
   return db.repositoryValidationRuns
     .filter((run) => run.impactAnalysisId === impactAnalysisId)
+    .sort((a, b) => b.createdAt.localeCompare(a.createdAt))[0] ?? null;
+}
+
+export async function updateRepositoryValidationRun(
+  runId: string,
+  input: Partial<Pick<RepositoryValidationRun, "aiFailureExplanation" | "failureExplanation" | "errorDetails">>,
+) {
+  const db = await readDb();
+  const run = db.repositoryValidationRuns.find((item) => item.id === runId);
+  if (!run) return null;
+  Object.assign(run, input);
+  await writeDb(db);
+  return run;
+}
+
+export async function saveRepositoryValidationRecommendation(
+  input: Omit<RepositoryValidationRecommendation, "id" | "createdAt" | "updatedAt">,
+) {
+  const db = await readDb();
+  const timestamp = now();
+  db.repositoryValidationRecommendations = (db.repositoryValidationRecommendations ?? []).filter(
+    (recommendation) => recommendation.impactAnalysisId !== input.impactAnalysisId,
+  );
+  const recommendation: RepositoryValidationRecommendation = {
+    ...input,
+    id: createId("repository_validation_recommendation"),
+    createdAt: timestamp,
+    updatedAt: timestamp,
+  };
+  db.repositoryValidationRecommendations.unshift(recommendation);
+  await writeDb(db);
+  return recommendation;
+}
+
+export async function getLatestRepositoryValidationRecommendation(impactAnalysisId: string) {
+  const db = await readDb();
+  return (db.repositoryValidationRecommendations ?? [])
+    .filter((recommendation) => recommendation.impactAnalysisId === impactAnalysisId)
     .sort((a, b) => b.createdAt.localeCompare(a.createdAt))[0] ?? null;
 }
 

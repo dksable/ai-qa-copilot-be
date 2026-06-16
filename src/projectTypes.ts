@@ -48,6 +48,7 @@ export type AIProviderFeatureName =
   | "repository-impact"
   | "repository-test-update"
   | "playwright-validation-failure"
+  | "ai-validation-recommendation"
   | "repository-fix-suggestion";
 export type AIProviderRequestFormat = "OpenAI Compatible";
 export type AIProviderUsageStatus = "Success" | "Failed";
@@ -78,8 +79,11 @@ export type RepositoryImpactSuggestionCategory =
   | "API"
   | "UI";
 export type RepositoryGeneratedTestUpdateStatus = "Pending" | "Approved" | "Rejected" | "Edited";
-export type RepositoryValidationRunStatus = "Pending" | "Running" | "Passed" | "Failed" | "Completed";
+export type RepositoryValidationRunStatus = "Pending" | "Running" | "Passed" | "Failed" | "Completed" | "Error";
 export type RepositoryUpdatePullRequestStatus = "Created" | "Failed";
+export type RepositoryValidationReleaseRecommendation = "Safe to Merge" | "Merge with Caution" | "Do Not Merge";
+export type RepositoryValidationMergeDecision = "Approved" | "Warning" | "Blocked";
+export type RepositoryValidationRecommendationStatus = "Generated" | "Regenerated" | "Failed";
 export type PlaywrightValidationStatus = "Queued" | "Running" | "Passed" | "Failed" | "Warning" | "Error";
 export type PlaywrightValidationSeverity = "Info" | "Warning" | "Error";
 
@@ -588,16 +592,31 @@ export interface RepositoryValidationRun {
   duration: number;
   browser: string;
   environment: string;
+  command?: string;
   logs: string;
   stdout?: string;
   stderr?: string;
   failedTestNames?: string[];
+  failedTests?: Array<{
+    testFile: string;
+    testName: string;
+    errorMessage: string;
+    duration: number;
+    suggestedAction: string;
+    stackTrace?: string;
+  }>;
+  stackTrace?: string;
   validationWorkspacePath?: string;
   errorDetails?: string;
   failureExplanation?: string;
+  aiFailureExplanation?: string;
   screenshots: string[];
   videos: string[];
+  traceFiles?: string[];
   reportUrl?: string;
+  jsonReportPath?: string;
+  htmlReportPath?: string;
+  jsonReportData?: unknown;
   createdBy?: string;
   createdAt: string;
   completedAt?: string;
@@ -616,6 +635,28 @@ export interface RepositoryUpdatePullRequest {
   status: RepositoryUpdatePullRequestStatus;
   createdBy?: string;
   createdAt: string;
+}
+
+export interface RepositoryValidationRecommendation {
+  id: string;
+  workspaceId: string;
+  projectId?: string;
+  impactAnalysisId: string;
+  validationRunId: string;
+  confidenceScore: number;
+  releaseRecommendation: RepositoryValidationReleaseRecommendation;
+  riskLevel: RepositoryRiskLevel;
+  summary: string;
+  reasons: string[];
+  recommendedActions: string[];
+  mergeDecision: RepositoryValidationMergeDecision;
+  qaOwnerAction: string;
+  aiProvider: string;
+  aiModel: string;
+  status: RepositoryValidationRecommendationStatus;
+  createdBy?: string;
+  createdAt: string;
+  updatedAt: string;
 }
 
 export interface RepositoryAnalysis {
@@ -860,6 +901,7 @@ export interface ProjectDatabase {
   repositoryImpactAnalyses: RepositoryImpactAnalysis[];
   repositoryGeneratedTestUpdates: RepositoryGeneratedTestUpdate[];
   repositoryValidationRuns: RepositoryValidationRun[];
+  repositoryValidationRecommendations: RepositoryValidationRecommendation[];
   repositoryUpdatePullRequests: RepositoryUpdatePullRequest[];
   repositoryAnalyses: RepositoryAnalysis[];
   repositorySyncs: RepositorySync[];

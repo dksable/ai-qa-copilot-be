@@ -33,6 +33,7 @@ import {
   getRepositoryImpactAnalysisByActivity,
   getRepositoryGeneratedTestUpdate,
   getLatestRepositoryValidationRun,
+  getLatestRepositoryValidationRecommendation,
   getRepositorySync,
   latestRepositorySync,
   listApplicationRepositoryConfigs,
@@ -46,12 +47,14 @@ import {
   saveRepositoryGeneratedTestUpdates,
   saveRepositoryUpdatePullRequest,
   saveRepositoryValidationRun,
+  saveRepositoryValidationRecommendation,
   saveRepositoryImpactAnalysis,
   saveRepositoryAnalysis,
   saveAutomationRepositoryConfig,
   updateApplicationRepositoryWebhook,
   updateRepositoryImpactAnalysisStatus,
   updateRepositoryGeneratedTestUpdate,
+  updateRepositoryValidationRun,
   updateRepositoryActivityStatus,
   updateRepositorySyncGeneratedUpdates,
   updateRepositorySyncPr,
@@ -65,6 +68,7 @@ import {
   generateRepositoryTestUpdates,
   validateRepositoryTestUpdates,
 } from "./repositoryTestUpdateService.js";
+import { generateValidationRecommendation } from "./repositoryValidationRecommendationService.js";
 import type { RepositoryActivityChangedFile, RepositoryChangeType, RepositoryRiskLevel, WorkspaceRole } from "./projectTypes.js";
 
 export const integrationRouter = Router();
@@ -588,9 +592,31 @@ integrationRouter.post("/integrations/github/impact-analysis/:impactAnalysisId/r
     return;
   }
   if (!(await requireWorkspaceRole(request, response, analysis.workspaceId, ["Owner", "Admin", "QA Lead", "QA Engineer"]))) return;
+  const runtimeConfig = await getAutomationRepositoryRuntimeConfig(analysis.workspaceId);
+  if (!runtimeConfig) {
+    response.status(400).json({ message: "Configure the automation repository before running validation." });
+    return;
+  }
   const updates = await listRepositoryGeneratedTestUpdates(analysis.id);
-  const run = await validateRepositoryTestUpdates({ impactAnalysis: analysis, updates, createdBy: request.userId });
-  response.status(201).json(await saveRepositoryValidationRun(run));
+  const run = await validateRepositoryTestUpdates({
+    impactAnalysis: analysis,
+    updates,
+    automationConfig: toGitHubConfig(runtimeConfig),
+    createdBy: request.userId,
+  });
+  const savedRun = await saveRepositoryValidationRun(run);
+  void generateValidationRecommendation({
+    impactAnalysis: analysis,
+    validationRun: savedRun,
+    updates,
+    status: "Generated",
+    createdBy: request.userId,
+  })
+    .then((recommendation) => saveRepositoryValidationRecommendation(recommendation))
+    .catch((error) => {
+      console.error("AI validation recommendation failed", error);
+    });
+  response.status(201).json(savedRun);
 }));
 
 integrationRouter.get("/integrations/github/impact-analysis/:impactAnalysisId/validation-result", asyncRoute(async (request, response) => {
@@ -634,6 +660,98 @@ integrationRouter.post("/integrations/github/impact-analysis/:impactAnalysisId/g
   response.json({ suggestion: buildFailureSuggestion(run) });
 }));
 
+integrationRouter.post("/integrations/github/impact-analysis/:impactAnalysisId/failure-explanation", asyncRoute(async (request, response) => {
+  const analysis = await getRepositoryImpactAnalysis(String(request.params.impactAnalysisId));
+  if (!analysis) {
+    response.status(404).json({ message: "Impact analysis not found." });
+    return;
+  }
+  if (!(await requireWorkspaceRole(request, response, analysis.workspaceId, ["Owner", "Admin", "QA Lead", "QA Engineer"]))) return;
+  const run = await getLatestRepositoryValidationRun(analysis.id);
+  if (!run) {
+    response.status(400).json({ message: "Run validation before generating a failure explanation." });
+    return;
+  }
+  const provider = await resolveAIProviderForFeature(analysis.workspaceId, "playwright-validation-failure");
+  await createAIProviderUsageLog({
+    workspaceId: analysis.workspaceId,
+    providerType: provider?.providerType ?? "default",
+    providerName: provider?.providerName ?? "AI QA Copilot Default AI",
+    modelName: provider?.modelName ?? process.env.GROQ_MODEL ?? "llama-3.3-70b-versatile",
+    featureName: "playwright-validation-failure",
+    tokenUsage: 0,
+    status: "Success",
+    createdBy: request.userId,
+  });
+  const explanation = buildFailureSuggestion(run);
+  const updated = await updateRepositoryValidationRun(run.id, {
+    aiFailureExplanation: explanation,
+    failureExplanation: explanation,
+  });
+  response.json({ suggestion: explanation, validationRun: updated ?? run });
+}));
+
+integrationRouter.post("/integrations/github/impact-analysis/:impactAnalysisId/validation-recommendation", asyncRoute(async (request, response) => {
+  const analysis = await getRepositoryImpactAnalysis(String(request.params.impactAnalysisId));
+  if (!analysis) {
+    response.status(404).json({ message: "Impact analysis not found." });
+    return;
+  }
+  if (!(await requireWorkspaceRole(request, response, analysis.workspaceId, ["Owner", "Admin", "QA Lead", "QA Engineer"]))) return;
+  const run = await getLatestRepositoryValidationRun(analysis.id);
+  if (!run) {
+    response.status(400).json({ message: "Run validation before generating AI recommendation." });
+    return;
+  }
+  const updates = await listRepositoryGeneratedTestUpdates(analysis.id);
+  const recommendation = await generateValidationRecommendation({
+    impactAnalysis: analysis,
+    validationRun: run,
+    updates,
+    status: "Generated",
+    createdBy: request.userId,
+  });
+  response.status(201).json(await saveRepositoryValidationRecommendation(recommendation));
+}));
+
+integrationRouter.get("/integrations/github/impact-analysis/:impactAnalysisId/validation-recommendation", asyncRoute(async (request, response) => {
+  const analysis = await getRepositoryImpactAnalysis(String(request.params.impactAnalysisId));
+  if (!analysis) {
+    response.status(404).json({ message: "Impact analysis not found." });
+    return;
+  }
+  if (!(await requireWorkspaceRole(request, response, analysis.workspaceId, ["Owner", "Admin", "QA Lead", "QA Engineer", "Viewer"]))) return;
+  const recommendation = await getLatestRepositoryValidationRecommendation(analysis.id);
+  if (!recommendation) {
+    response.status(404).json({ message: "AI validation recommendation not found." });
+    return;
+  }
+  response.json(recommendation);
+}));
+
+integrationRouter.post("/integrations/github/impact-analysis/:impactAnalysisId/validation-recommendation/regenerate", asyncRoute(async (request, response) => {
+  const analysis = await getRepositoryImpactAnalysis(String(request.params.impactAnalysisId));
+  if (!analysis) {
+    response.status(404).json({ message: "Impact analysis not found." });
+    return;
+  }
+  if (!(await requireWorkspaceRole(request, response, analysis.workspaceId, ["Owner", "Admin", "QA Lead", "QA Engineer"]))) return;
+  const run = await getLatestRepositoryValidationRun(analysis.id);
+  if (!run) {
+    response.status(400).json({ message: "Run validation before regenerating AI recommendation." });
+    return;
+  }
+  const updates = await listRepositoryGeneratedTestUpdates(analysis.id);
+  const recommendation = await generateValidationRecommendation({
+    impactAnalysis: analysis,
+    validationRun: run,
+    updates,
+    status: "Regenerated",
+    createdBy: request.userId,
+  });
+  response.status(201).json(await saveRepositoryValidationRecommendation(recommendation));
+}));
+
 integrationRouter.post("/integrations/github/impact-analysis/:impactAnalysisId/create-pr", asyncRoute(async (request, response) => {
   const analysis = await getRepositoryImpactAnalysis(String(request.params.impactAnalysisId));
   if (!analysis) {
@@ -653,11 +771,22 @@ integrationRouter.post("/integrations/github/impact-analysis/:impactAnalysisId/c
     return;
   }
   const validationRun = await getLatestRepositoryValidationRun(analysis.id);
+  const validationRecommendation = await getLatestRepositoryValidationRecommendation(analysis.id);
+  const force = z.object({ force: z.boolean().optional() }).parse(request.body ?? {}).force ?? false;
+  if (!validationRun) {
+    response.status(400).json({ message: "Run Playwright validation before creating a pull request." });
+    return;
+  }
+  if (validationRun.status !== "Passed" && !force) {
+    response.status(409).json({ message: "Validation did not pass. Confirm force=true to create a PR for QA review." });
+    return;
+  }
   const pr = await createImpactUpdatePullRequest({
     impactAnalysis: analysis,
     automationConfig: toGitHubConfig(runtimeConfig),
     approvedUpdates,
     validationRun,
+    validationRecommendation,
   });
   const saved = await saveRepositoryUpdatePullRequest({
     workspaceId: analysis.workspaceId,

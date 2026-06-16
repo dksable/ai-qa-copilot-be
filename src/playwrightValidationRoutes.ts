@@ -1,4 +1,6 @@
 import { Router, type RequestHandler } from "express";
+import { readdir, stat } from "node:fs/promises";
+import path from "node:path";
 import { z } from "zod";
 
 import {
@@ -10,6 +12,8 @@ import {
 import { validatePlaywrightCode } from "./playwrightValidationService.js";
 
 export const playwrightValidationRouter = Router();
+
+const validationRoot = path.join(process.cwd(), "tmp", "playwright-validation");
 
 const ValidationJobSchema = z.object({
   workspaceId: z.string().optional(),
@@ -99,3 +103,64 @@ playwrightValidationRouter.get(
     response.json(job);
   }),
 );
+
+playwrightValidationRouter.get(
+  "/playwright-validation/:runId/artifacts",
+  asyncRoute(async (request, response) => {
+    const runId = z.string().regex(/^validation-[a-zA-Z0-9-]+$/).parse(request.params.runId);
+    const runPath = path.join(validationRoot, runId);
+    const files = await walkArtifactFiles(runPath);
+    response.json({
+      runId,
+      files: files.map((file) => ({
+        path: path.relative(runPath, file).replace(/\\/g, "/"),
+        type: artifactType(file),
+      })),
+      reportUrl: files.some((file) => path.relative(runPath, file).replace(/\\/g, "/") === "playwright-report/index.html")
+        ? `/api/playwright-validation/${runId}/report`
+        : null,
+    });
+  }),
+);
+
+playwrightValidationRouter.get(
+  "/playwright-validation/:runId/report",
+  asyncRoute(async (request, response) => {
+    const runId = z.string().regex(/^validation-[a-zA-Z0-9-]+$/).parse(request.params.runId);
+    const reportPath = path.join(validationRoot, runId, "playwright-report", "index.html");
+    response.sendFile(reportPath, (error) => {
+      if (error && !response.headersSent) {
+        response.status(404).json({ message: "Playwright HTML report not found." });
+      }
+    });
+  }),
+);
+
+async function walkArtifactFiles(root: string): Promise<string[]> {
+  try {
+    const entries = await readdir(root);
+    const files: string[] = [];
+    for (const entry of entries) {
+      if (entry === "node_modules") continue;
+      const fullPath = path.join(root, entry);
+      const info = await stat(fullPath);
+      if (info.isDirectory()) {
+        files.push(...await walkArtifactFiles(fullPath));
+      } else {
+        files.push(fullPath);
+      }
+    }
+    return files;
+  } catch {
+    return [];
+  }
+}
+
+function artifactType(filePath: string) {
+  if (/playwright-report[/\\]index\.html$/i.test(filePath)) return "html-report";
+  if (/playwright-report\.json$/i.test(filePath)) return "json-report";
+  if (/\.(png|jpg|jpeg)$/i.test(filePath)) return "screenshot";
+  if (/\.(webm|mp4)$/i.test(filePath)) return "video";
+  if (/\.zip$/i.test(filePath)) return "trace";
+  return "file";
+}
