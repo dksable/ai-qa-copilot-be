@@ -127,6 +127,61 @@ export async function getRepoInfo(config: GitHubAutomationConfig) {
   }>(config, `/repos/${encodeURIComponent(config.owner)}/${encodeURIComponent(config.repo)}`);
 }
 
+export async function createGitHubWebhook(config: GitHubAutomationConfig, input: {
+  webhookUrl: string;
+  secret: string;
+}) {
+  return githubRequest<{
+    id: number;
+    active: boolean;
+    config: { url?: string };
+    events: string[];
+  }>(config, `/repos/${encodeURIComponent(config.owner)}/${encodeURIComponent(config.repo)}/hooks`, {
+    method: "POST",
+    body: JSON.stringify({
+      name: "web",
+      active: true,
+      events: ["push", "pull_request"],
+      config: {
+        url: input.webhookUrl,
+        content_type: "json",
+        secret: input.secret,
+        insecure_ssl: "0",
+      },
+    }),
+  });
+}
+
+export async function compareGitHubCommits(config: GitHubAutomationConfig, baseSha: string, headSha: string) {
+  return githubRequest<{
+    files?: Array<{
+      filename: string;
+      status: "added" | "modified" | "removed" | "renamed";
+      additions?: number;
+      deletions?: number;
+      patch?: string;
+      previous_filename?: string;
+    }>;
+  }>(
+    config,
+    `/repos/${encodeURIComponent(config.owner)}/${encodeURIComponent(config.repo)}/compare/${encodeURIComponent(baseSha)}...${encodeURIComponent(headSha)}`,
+  );
+}
+
+export async function listGitHubPullRequestFiles(config: GitHubAutomationConfig, pullRequestNumber: number) {
+  return githubRequest<Array<{
+    filename: string;
+    status: "added" | "modified" | "removed" | "renamed";
+    additions?: number;
+    deletions?: number;
+    patch?: string;
+    previous_filename?: string;
+  }>>(
+    config,
+    `/repos/${encodeURIComponent(config.owner)}/${encodeURIComponent(config.repo)}/pulls/${pullRequestNumber}/files?per_page=100`,
+  );
+}
+
 export async function getDefaultBranch(config: GitHubAutomationConfig) {
   const branch = await githubRequest<{ commit: { sha: string } }>(
     config,
@@ -148,7 +203,7 @@ export async function getLatestCommitSha(config: GitHubAutomationConfig) {
   return getDefaultBranch(config);
 }
 
-async function readRepositoryFile(config: GitHubAutomationConfig, filePath: string) {
+export async function readRepositoryFile(config: GitHubAutomationConfig, filePath: string) {
   const encodedPath = filePath.split("/").map(encodeURIComponent).join("/");
   try {
     const file = await githubRequest<{ content?: string; encoding?: string; path: string }>(

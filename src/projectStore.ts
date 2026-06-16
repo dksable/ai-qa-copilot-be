@@ -23,6 +23,9 @@ import type {
   AIProviderUsageLog,
   AIProviderUsageStatus,
   ActivityLog,
+  ApplicationRepositoryConfig,
+  ApplicationRepositoryStatus,
+  ApplicationRepositoryType,
   AutomationRepositoryConfig,
   BillingCycle,
   DashboardStats,
@@ -36,8 +39,17 @@ import type {
   ModulePriority,
   Plan,
   PlanId,
+  PlaywrightValidationJob,
   ProjectPermissionLevel,
   RepositoryAnalysis,
+  RepositoryActivity,
+  RepositoryActivityStatus,
+  RepositoryImpactAnalysis,
+  RepositoryImpactAnalysisStatus,
+  RepositoryGeneratedTestUpdate,
+  RepositoryGeneratedTestUpdateStatus,
+  RepositoryUpdatePullRequest,
+  RepositoryValidationRun,
   RepositoryAISuggestion,
   RepositoryChangedFile,
   RepositoryGeneratedUpdate,
@@ -90,6 +102,10 @@ const aiProviderFeatures: AIProviderFeatureName[] = [
   "playwright-generation",
   "requirement-impact",
   "coverage-score",
+  "repository-impact",
+  "repository-test-update",
+  "playwright-validation-failure",
+  "repository-fix-suggestion",
 ];
 const planCatalog: Plan[] = [
   {
@@ -251,8 +267,15 @@ const initialDb: ProjectDatabase = {
   aiProviderFeatureMappings: [],
   aiProviderUsageLogs: [],
   automationRepositoryConfigs: [],
+  applicationRepositoryConfigs: [],
+  repositoryActivities: [],
+  repositoryImpactAnalyses: [],
+  repositoryGeneratedTestUpdates: [],
+  repositoryValidationRuns: [],
+  repositoryUpdatePullRequests: [],
   repositoryAnalyses: [],
   repositorySyncs: [],
+  playwrightValidations: [],
   testRuns: [],
   testExecutions: [],
   testExecutionHistories: [],
@@ -401,8 +424,15 @@ function normalizeDatabase(db: ProjectDatabase): ProjectDatabase {
     aiProviderFeatureMappings: db.aiProviderFeatureMappings ?? [],
     aiProviderUsageLogs: db.aiProviderUsageLogs ?? [],
     automationRepositoryConfigs: (db.automationRepositoryConfigs ?? []).map(normalizeAutomationRepositoryConfig),
+    applicationRepositoryConfigs: (db.applicationRepositoryConfigs ?? []).map(normalizeApplicationRepositoryConfig),
+    repositoryActivities: (db.repositoryActivities ?? []).map(normalizeRepositoryActivity),
+    repositoryImpactAnalyses: (db.repositoryImpactAnalyses ?? []).map(normalizeRepositoryImpactAnalysis),
+    repositoryGeneratedTestUpdates: (db.repositoryGeneratedTestUpdates ?? []).map(normalizeRepositoryGeneratedTestUpdate),
+    repositoryValidationRuns: (db.repositoryValidationRuns ?? []).map(normalizeRepositoryValidationRun),
+    repositoryUpdatePullRequests: db.repositoryUpdatePullRequests ?? [],
     repositoryAnalyses: (db.repositoryAnalyses ?? []).map(normalizeRepositoryAnalysis),
     repositorySyncs: (db.repositorySyncs ?? []).map(normalizeRepositorySync),
+    playwrightValidations: (db.playwrightValidations ?? []).map(normalizePlaywrightValidation),
     testRuns: db.testRuns ?? [],
     testExecutions: (db.testExecutions ?? []).map(normalizeTestExecution),
     testExecutionHistories: db.testExecutionHistories ?? [],
@@ -487,6 +517,82 @@ function normalizeAutomationRepositoryConfig(config: AutomationRepositoryConfig)
   };
 }
 
+function normalizeApplicationRepositoryConfig(config: ApplicationRepositoryConfig): ApplicationRepositoryConfig {
+  const timestamp = config.createdAt ?? now();
+  return {
+    ...config,
+    provider: "github",
+    repositoryType: config.repositoryType ?? "frontend",
+    defaultBranch: config.defaultBranch ?? "main",
+    webhookUrl: config.webhookUrl ?? "",
+    webhookStatus: config.webhookStatus ?? "Pending",
+    createdAt: timestamp,
+    updatedAt: config.updatedAt ?? timestamp,
+  };
+}
+
+function normalizeRepositoryActivity(activity: RepositoryActivity): RepositoryActivity {
+  return {
+    ...activity,
+    provider: "github",
+    repositoryType: activity.repositoryType ?? "frontend",
+    changedFiles: activity.changedFiles ?? [],
+    fileCount: activity.fileCount ?? activity.changedFiles?.length ?? 0,
+    status: activity.status ?? "New",
+    createdAt: activity.createdAt ?? now(),
+  };
+}
+
+function normalizeRepositoryImpactAnalysis(analysis: RepositoryImpactAnalysis): RepositoryImpactAnalysis {
+  const timestamp = analysis.createdAt ?? now();
+  return {
+    ...analysis,
+    provider: "github",
+    changedFiles: analysis.changedFiles ?? [],
+    impactedModules: analysis.impactedModules ?? [],
+    impactedTests: analysis.impactedTests ?? [],
+    suggestions: analysis.suggestions ?? [],
+    riskLevel: analysis.riskLevel ?? "Low",
+    confidenceScore: analysis.confidenceScore ?? 0,
+    recommendation: analysis.recommendation ?? "Review changed files before release.",
+    status: analysis.status ?? "Completed",
+    createdAt: timestamp,
+    updatedAt: analysis.updatedAt ?? timestamp,
+  };
+}
+
+function normalizeRepositoryGeneratedTestUpdate(update: RepositoryGeneratedTestUpdate): RepositoryGeneratedTestUpdate {
+  const timestamp = update.createdAt ?? now();
+  return {
+    ...update,
+    oldCode: update.oldCode ?? "",
+    newCode: update.newCode ?? "",
+    status: update.status ?? "Pending",
+    aiProvider: update.aiProvider ?? "AI QA Copilot Default AI",
+    aiModel: update.aiModel ?? process.env.GROQ_MODEL ?? "llama-3.3-70b-versatile",
+    createdAt: timestamp,
+    updatedAt: update.updatedAt ?? timestamp,
+  };
+}
+
+function normalizeRepositoryValidationRun(run: RepositoryValidationRun): RepositoryValidationRun {
+  const timestamp = run.createdAt ?? now();
+  return {
+    ...run,
+    totalTests: run.totalTests ?? 0,
+    passed: run.passed ?? 0,
+    failed: run.failed ?? 0,
+    skipped: run.skipped ?? 0,
+    duration: run.duration ?? 0,
+    browser: run.browser ?? "chromium",
+    environment: run.environment ?? "temporary-workspace",
+    logs: run.logs ?? "",
+    screenshots: run.screenshots ?? [],
+    videos: run.videos ?? [],
+    createdAt: timestamp,
+  };
+}
+
 function normalizeRepositoryAnalysis(analysis: RepositoryAnalysis): RepositoryAnalysis {
   const timestamp = analysis.createdAt ?? now();
   return {
@@ -526,6 +632,18 @@ function normalizeRepositorySync(sync: RepositorySync): RepositorySync {
   };
 }
 
+function normalizePlaywrightValidation(job: PlaywrightValidationJob): PlaywrightValidationJob {
+  const timestamp = job.createdAt ?? now();
+  return {
+    ...job,
+    fileName: job.fileName ?? "playwright.spec.ts",
+    playwrightCode: job.playwrightCode ?? "",
+    status: job.status ?? "Queued",
+    createdAt: timestamp,
+    updatedAt: job.updatedAt ?? timestamp,
+  };
+}
+
 function normalizeTestExecution(execution: TestExecution): TestExecution {
   const timestamp = execution.createdAt ?? now();
   return {
@@ -552,6 +670,15 @@ function sanitizeAIProvider(config: AIProviderConfig) {
 
 function sanitizeAutomationRepositoryConfig(config: AutomationRepositoryConfig) {
   const { tokenEncrypted: _tokenEncrypted, ...safe } = config;
+  return safe;
+}
+
+function sanitizeApplicationRepositoryConfig(config: ApplicationRepositoryConfig) {
+  const {
+    tokenEncrypted: _tokenEncrypted,
+    webhookSecretEncrypted: _webhookSecretEncrypted,
+    ...safe
+  } = config;
   return safe;
 }
 
@@ -2071,6 +2198,344 @@ export async function saveAutomationRepositoryConfig(input: {
   return sanitizeAutomationRepositoryConfig(config);
 }
 
+export async function saveApplicationRepositoryConfig(input: {
+  workspaceId: string;
+  projectId?: string;
+  repositoryType: ApplicationRepositoryType;
+  token: string;
+  owner: string;
+  repo: string;
+  defaultBranch: string;
+  webhookSecret: string;
+  webhookUrl: string;
+  webhookStatus?: ApplicationRepositoryStatus;
+  webhookError?: string;
+  webhookId?: number;
+  userId?: string;
+}) {
+  const db = await readDb();
+  const timestamp = now();
+  let config = db.applicationRepositoryConfigs.find(
+    (item) =>
+      item.workspaceId === input.workspaceId &&
+      item.provider === "github" &&
+      item.repositoryType === input.repositoryType &&
+      item.owner.toLowerCase() === input.owner.toLowerCase() &&
+      item.repo.toLowerCase() === input.repo.toLowerCase(),
+  );
+  if (!config) {
+    config = {
+      id: createId("application_repo"),
+      workspaceId: input.workspaceId,
+      projectId: input.projectId,
+      repositoryType: input.repositoryType,
+      provider: "github",
+      tokenEncrypted: encryptSecret(input.token),
+      tokenMasked: maskSecret(input.token),
+      owner: input.owner,
+      repo: input.repo,
+      defaultBranch: input.defaultBranch || "main",
+      webhookSecretEncrypted: encryptSecret(input.webhookSecret),
+      webhookSecretMasked: maskSecret(input.webhookSecret),
+      webhookUrl: input.webhookUrl,
+      webhookId: input.webhookId,
+      webhookStatus: input.webhookStatus ?? "Pending",
+      webhookError: input.webhookError,
+      createdBy: input.userId ?? defaultUserId,
+      createdAt: timestamp,
+      updatedAt: timestamp,
+    };
+    db.applicationRepositoryConfigs.push(config);
+  } else {
+    config.projectId = input.projectId ?? config.projectId;
+    config.tokenEncrypted = encryptSecret(input.token);
+    config.tokenMasked = maskSecret(input.token);
+    config.owner = input.owner;
+    config.repo = input.repo;
+    config.defaultBranch = input.defaultBranch || "main";
+    config.webhookSecretEncrypted = encryptSecret(input.webhookSecret);
+    config.webhookSecretMasked = maskSecret(input.webhookSecret);
+    config.webhookUrl = input.webhookUrl;
+    config.webhookId = input.webhookId;
+    config.webhookStatus = input.webhookStatus ?? config.webhookStatus;
+    config.webhookError = input.webhookError;
+    config.updatedBy = input.userId;
+    config.updatedAt = timestamp;
+  }
+  addActivityLog(db, {
+    workspaceId: input.workspaceId,
+    action: "GitHub application repository connected",
+    resourceType: "ApplicationRepositoryConfig",
+    resourceId: config.id,
+    newValue: {
+      repositoryType: config.repositoryType,
+      owner: config.owner,
+      repo: config.repo,
+      defaultBranch: config.defaultBranch,
+      webhookStatus: config.webhookStatus,
+    },
+  });
+  await writeDb(db);
+  return sanitizeApplicationRepositoryConfig(config);
+}
+
+export async function listApplicationRepositoryConfigs(workspaceId = defaultWorkspaceId) {
+  const db = await readDb();
+  return db.applicationRepositoryConfigs
+    .filter((config) => config.workspaceId === workspaceId)
+    .map(sanitizeApplicationRepositoryConfig)
+    .sort((a, b) => b.updatedAt.localeCompare(a.updatedAt));
+}
+
+export async function getApplicationRepositoryConfig(configId: string) {
+  const db = await readDb();
+  const config = db.applicationRepositoryConfigs.find((item) => item.id === configId);
+  return config ? sanitizeApplicationRepositoryConfig(config) : null;
+}
+
+export async function getApplicationRepositoryRuntimeConfig(configId: string) {
+  const db = await readDb();
+  const config = db.applicationRepositoryConfigs.find((item) => item.id === configId);
+  return config
+    ? {
+        ...config,
+        token: decryptAutomationRepositoryToken(config.tokenEncrypted),
+        webhookSecret: decryptAIProviderSecret(config.webhookSecretEncrypted),
+      }
+    : null;
+}
+
+export async function findApplicationRepositoryRuntimeConfig(input: {
+  owner: string;
+  repo: string;
+}) {
+  const db = await readDb();
+  const config = db.applicationRepositoryConfigs.find(
+    (item) =>
+      item.provider === "github" &&
+      item.owner.toLowerCase() === input.owner.toLowerCase() &&
+      item.repo.toLowerCase() === input.repo.toLowerCase(),
+  );
+  return config
+    ? {
+        ...config,
+        token: decryptAutomationRepositoryToken(config.tokenEncrypted),
+        webhookSecret: decryptAIProviderSecret(config.webhookSecretEncrypted),
+      }
+    : null;
+}
+
+export async function updateApplicationRepositoryWebhook(input: {
+  configId: string;
+  webhookStatus: ApplicationRepositoryStatus;
+  webhookId?: number;
+  webhookError?: string;
+  webhookUrl?: string;
+  userId?: string;
+}) {
+  const db = await readDb();
+  const config = db.applicationRepositoryConfigs.find((item) => item.id === input.configId);
+  if (!config) return null;
+  config.webhookStatus = input.webhookStatus;
+  config.webhookId = input.webhookId ?? config.webhookId;
+  config.webhookUrl = input.webhookUrl ?? config.webhookUrl;
+  config.webhookError = input.webhookError;
+  config.updatedBy = input.userId;
+  config.updatedAt = now();
+  await writeDb(db);
+  return sanitizeApplicationRepositoryConfig(config);
+}
+
+export async function deleteApplicationRepositoryConfig(configId: string) {
+  const db = await readDb();
+  const index = db.applicationRepositoryConfigs.findIndex((item) => item.id === configId);
+  if (index === -1) return false;
+  const [config] = db.applicationRepositoryConfigs.splice(index, 1);
+  addActivityLog(db, {
+    workspaceId: config.workspaceId,
+    action: "GitHub application repository disconnected",
+    resourceType: "ApplicationRepositoryConfig",
+    resourceId: config.id,
+    oldValue: { owner: config.owner, repo: config.repo, repositoryType: config.repositoryType },
+  });
+  await writeDb(db);
+  return true;
+}
+
+export async function createRepositoryActivity(input: Omit<RepositoryActivity, "id" | "status" | "createdAt">) {
+  const db = await readDb();
+  if (input.deliveryId && db.repositoryActivities.some((activity) => activity.deliveryId === input.deliveryId)) {
+    return db.repositoryActivities.find((activity) => activity.deliveryId === input.deliveryId)!;
+  }
+  const timestamp = now();
+  const activity: RepositoryActivity = {
+    ...input,
+    id: createId("repository_activity"),
+    status: "New",
+    createdAt: timestamp,
+  };
+  db.repositoryActivities.unshift(activity);
+  db.repositoryActivities = db.repositoryActivities.slice(0, 1000);
+  const config = db.applicationRepositoryConfigs.find((item) => item.id === input.repositoryConfigId);
+  if (config) {
+    config.lastEventReceivedAt = timestamp;
+    config.lastSyncedAt = timestamp;
+    config.updatedAt = timestamp;
+  }
+  await writeDb(db);
+  return activity;
+}
+
+export async function listRepositoryActivities(filters: {
+  workspaceId?: string;
+  repositoryConfigId?: string;
+  status?: RepositoryActivityStatus;
+} = {}) {
+  const db = await readDb();
+  return db.repositoryActivities
+    .filter((activity) => !filters.workspaceId || activity.workspaceId === filters.workspaceId)
+    .filter((activity) => !filters.repositoryConfigId || activity.repositoryConfigId === filters.repositoryConfigId)
+    .filter((activity) => !filters.status || activity.status === filters.status)
+    .sort((a, b) => b.createdAt.localeCompare(a.createdAt));
+}
+
+export async function getRepositoryActivity(activityId: string) {
+  const db = await readDb();
+  return db.repositoryActivities.find((activity) => activity.id === activityId) ?? null;
+}
+
+export async function updateRepositoryActivityStatus(activityId: string, status: RepositoryActivityStatus) {
+  const db = await readDb();
+  const activity = db.repositoryActivities.find((item) => item.id === activityId);
+  if (!activity) return null;
+  activity.status = status;
+  await writeDb(db);
+  return activity;
+}
+
+export async function getRepositoryImpactAnalysisByActivity(activityId: string) {
+  const db = await readDb();
+  return db.repositoryImpactAnalyses.find((analysis) => analysis.repositoryActivityId === activityId) ?? null;
+}
+
+export async function getRepositoryImpactAnalysis(impactAnalysisId: string) {
+  const db = await readDb();
+  return db.repositoryImpactAnalyses.find((analysis) => analysis.id === impactAnalysisId) ?? null;
+}
+
+export async function saveRepositoryImpactAnalysis(
+  input: Omit<RepositoryImpactAnalysis, "id" | "createdAt" | "updatedAt">,
+  options: { replaceExisting?: boolean } = {},
+) {
+  const db = await readDb();
+  const timestamp = now();
+  const existing = db.repositoryImpactAnalyses.find(
+    (analysis) => analysis.repositoryActivityId === input.repositoryActivityId,
+  );
+  if (existing && options.replaceExisting) {
+    Object.assign(existing, input, { updatedAt: timestamp });
+    await writeDb(db);
+    return existing;
+  }
+  const analysis: RepositoryImpactAnalysis = {
+    ...input,
+    id: createId("repository_impact"),
+    createdAt: timestamp,
+    updatedAt: timestamp,
+  };
+  db.repositoryImpactAnalyses.unshift(analysis);
+  await writeDb(db);
+  return analysis;
+}
+
+export async function updateRepositoryImpactAnalysisStatus(
+  impactAnalysisId: string,
+  status: RepositoryImpactAnalysisStatus,
+) {
+  const db = await readDb();
+  const analysis = db.repositoryImpactAnalyses.find((item) => item.id === impactAnalysisId);
+  if (!analysis) return null;
+  analysis.status = status;
+  analysis.updatedAt = now();
+  await writeDb(db);
+  return analysis;
+}
+
+export async function saveRepositoryGeneratedTestUpdates(
+  impactAnalysisId: string,
+  updates: Omit<RepositoryGeneratedTestUpdate, "id" | "createdAt" | "updatedAt">[],
+) {
+  const db = await readDb();
+  const timestamp = now();
+  db.repositoryGeneratedTestUpdates = db.repositoryGeneratedTestUpdates.filter(
+    (update) => update.impactAnalysisId !== impactAnalysisId,
+  );
+  const saved = updates.map((update) => ({
+    ...update,
+    id: createId("repository_test_update"),
+    createdAt: timestamp,
+    updatedAt: timestamp,
+  }));
+  db.repositoryGeneratedTestUpdates.unshift(...saved);
+  await writeDb(db);
+  return saved;
+}
+
+export async function listRepositoryGeneratedTestUpdates(impactAnalysisId: string) {
+  const db = await readDb();
+  return db.repositoryGeneratedTestUpdates
+    .filter((update) => update.impactAnalysisId === impactAnalysisId)
+    .sort((a, b) => a.testFilePath.localeCompare(b.testFilePath));
+}
+
+export async function getRepositoryGeneratedTestUpdate(updateId: string) {
+  const db = await readDb();
+  return db.repositoryGeneratedTestUpdates.find((update) => update.id === updateId) ?? null;
+}
+
+export async function updateRepositoryGeneratedTestUpdate(
+  updateId: string,
+  input: Partial<Pick<RepositoryGeneratedTestUpdate, "status" | "newCode" | "updateSummary" | "confidenceScore">>,
+) {
+  const db = await readDb();
+  const update = db.repositoryGeneratedTestUpdates.find((item) => item.id === updateId);
+  if (!update) return null;
+  Object.assign(update, input, { updatedAt: now() });
+  await writeDb(db);
+  return update;
+}
+
+export async function saveRepositoryValidationRun(input: Omit<RepositoryValidationRun, "id" | "createdAt">) {
+  const db = await readDb();
+  const run: RepositoryValidationRun = {
+    ...input,
+    id: createId("repository_validation"),
+    createdAt: now(),
+  };
+  db.repositoryValidationRuns.unshift(run);
+  await writeDb(db);
+  return run;
+}
+
+export async function getLatestRepositoryValidationRun(impactAnalysisId: string) {
+  const db = await readDb();
+  return db.repositoryValidationRuns
+    .filter((run) => run.impactAnalysisId === impactAnalysisId)
+    .sort((a, b) => b.createdAt.localeCompare(a.createdAt))[0] ?? null;
+}
+
+export async function saveRepositoryUpdatePullRequest(input: Omit<RepositoryUpdatePullRequest, "id" | "createdAt">) {
+  const db = await readDb();
+  const pr: RepositoryUpdatePullRequest = {
+    ...input,
+    id: createId("repository_update_pr"),
+    createdAt: now(),
+  };
+  db.repositoryUpdatePullRequests.unshift(pr);
+  await writeDb(db);
+  return pr;
+}
+
 export async function saveRepositoryAnalysis(input: Omit<RepositoryAnalysis, "id" | "createdAt" | "updatedAt">) {
   const db = await readDb();
   const timestamp = now();
@@ -2278,6 +2743,53 @@ export async function updateRepositorySyncPr(syncId: string, prUrl: string) {
   });
   await writeDb(db);
   return sync;
+}
+
+export async function createPlaywrightValidationJob(
+  input: Omit<PlaywrightValidationJob, "id" | "status" | "createdAt" | "updatedAt">,
+) {
+  const db = await readDb();
+  const timestamp = now();
+  const job: PlaywrightValidationJob = {
+    ...input,
+    id: createId("playwright_validation"),
+    status: "Queued",
+    createdAt: timestamp,
+    updatedAt: timestamp,
+  };
+  db.playwrightValidations.unshift(job);
+  await writeDb(db);
+  return job;
+}
+
+export async function updatePlaywrightValidationJob(
+  jobId: string,
+  input: Partial<Pick<PlaywrightValidationJob, "status" | "result" | "errorMessage">>,
+) {
+  const db = await readDb();
+  const job = db.playwrightValidations.find((item) => item.id === jobId);
+  if (!job) throw httpError("Playwright validation job not found.", 404);
+  Object.assign(job, input, { updatedAt: now() });
+  await writeDb(db);
+  return job;
+}
+
+export async function getPlaywrightValidationJob(jobId: string) {
+  const db = await readDb();
+  return db.playwrightValidations.find((job) => job.id === jobId) ?? null;
+}
+
+export async function listPlaywrightValidationJobs(filters: {
+  workspaceId?: string;
+  projectId?: string;
+  requirementId?: string;
+} = {}) {
+  const db = await readDb();
+  return db.playwrightValidations
+    .filter((job) => !filters.workspaceId || job.workspaceId === filters.workspaceId)
+    .filter((job) => !filters.projectId || job.projectId === filters.projectId)
+    .filter((job) => !filters.requirementId || job.requirementId === filters.requirementId)
+    .slice(0, 50);
 }
 
 export async function listApprovedTestCaseVersions(filters: {

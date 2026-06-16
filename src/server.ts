@@ -10,8 +10,9 @@ import { aiProviderRouter } from "./aiProviderRoutes.js";
 import { analyticsRouter } from "./analyticsRoutes.js";
 import { authRouter } from "./authRoutes.js";
 import { exportRouter } from "./exportRoutes.js";
-import { integrationRouter } from "./integrationRoutes.js";
+import { githubWebhookRouter, integrationRouter } from "./integrationRoutes.js";
 import { requireAuth } from "./permissionMiddleware.js";
+import { playwrightValidationRouter } from "./playwrightValidationRoutes.js";
 import { pricingRouter } from "./pricingRoutes.js";
 import { projectRouter } from "./projectRoutes.js";
 import { reviewRouter } from "./reviewRoutes.js";
@@ -52,7 +53,12 @@ app.use(
   }),
 );
 app.options("*", cors());
-app.use(express.json({ limit: "1mb" }));
+app.use(express.json({
+  limit: "1mb",
+  verify: (request, _response, buffer) => {
+    (request as typeof request & { rawBody?: Buffer }).rawBody = Buffer.from(buffer);
+  },
+}));
 
 app.get("/", (_request, response) => {
   response.json({
@@ -74,12 +80,14 @@ setInterval(() => {
 }, 60 * 60 * 1000);
 
 app.use("/api", authRouter);
+app.use("/api", githubWebhookRouter);
 app.use("/api", requireAuth);
 app.use("/api", projectRouter);
 app.use("/api", pricingRouter);
 app.use("/api", analyticsRouter);
 app.use("/api", exportRouter);
 app.use("/api", integrationRouter);
+app.use("/api", playwrightValidationRouter);
 app.use("/api", aiChatRouter);
 app.use("/api", aiProviderRouter);
 app.use("/api", reviewRouter);

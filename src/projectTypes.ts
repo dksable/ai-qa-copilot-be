@@ -44,10 +44,16 @@ export type AIProviderFeatureName =
   | "ai-chat"
   | "playwright-generation"
   | "requirement-impact"
-  | "coverage-score";
+  | "coverage-score"
+  | "repository-impact"
+  | "repository-test-update"
+  | "playwright-validation-failure"
+  | "repository-fix-suggestion";
 export type AIProviderRequestFormat = "OpenAI Compatible";
 export type AIProviderUsageStatus = "Success" | "Failed";
 export type AutomationRepositoryProvider = "github";
+export type ApplicationRepositoryType = "frontend" | "backend";
+export type ApplicationRepositoryStatus = "Connected" | "Failed" | "Pending";
 export type RepositoryAnalysisLanguage = "TypeScript" | "JavaScript" | "Java" | "Unknown";
 export type RepositoryAnalysisFramework =
   | "Playwright"
@@ -61,6 +67,21 @@ export type RepositorySyncStatus = "Pending" | "Completed" | "Failed";
 export type RepositoryChangeType = "Added" | "Modified" | "Deleted";
 export type RepositoryRiskLevel = "Low" | "Medium" | "High";
 export type RepositorySuggestedAction = "Update" | "Add" | "Review" | "No Action";
+export type RepositoryActivityStatus = "New" | "Reviewed" | "Ignored";
+export type RepositoryImpactAnalysisStatus = "Pending" | "Completed" | "Failed" | "Reviewed";
+export type RepositoryImpactSuggestedAction = "Update Test" | "Add New Test" | "Review Manually" | "No Action";
+export type RepositoryImpactSuggestionCategory =
+  | "Automation"
+  | "Manual Testing"
+  | "Regression"
+  | "Data"
+  | "API"
+  | "UI";
+export type RepositoryGeneratedTestUpdateStatus = "Pending" | "Approved" | "Rejected" | "Edited";
+export type RepositoryValidationRunStatus = "Pending" | "Running" | "Passed" | "Failed" | "Completed";
+export type RepositoryUpdatePullRequestStatus = "Created" | "Failed";
+export type PlaywrightValidationStatus = "Queued" | "Running" | "Passed" | "Failed" | "Warning" | "Error";
+export type PlaywrightValidationSeverity = "Info" | "Warning" | "Error";
 
 export interface User {
   id: string;
@@ -428,6 +449,171 @@ export interface AutomationRepositoryConfig {
   updatedAt: string;
 }
 
+export interface ApplicationRepositoryConfig {
+  id: string;
+  workspaceId: string;
+  projectId?: string;
+  repositoryType: ApplicationRepositoryType;
+  provider: AutomationRepositoryProvider;
+  tokenEncrypted: string;
+  tokenMasked: string;
+  owner: string;
+  repo: string;
+  defaultBranch: string;
+  webhookSecretEncrypted: string;
+  webhookSecretMasked: string;
+  webhookUrl: string;
+  webhookId?: number;
+  webhookStatus: ApplicationRepositoryStatus;
+  webhookError?: string;
+  lastEventReceivedAt?: string;
+  lastSyncedAt?: string;
+  createdBy: string;
+  updatedBy?: string;
+  createdAt: string;
+  updatedAt: string;
+}
+
+export interface RepositoryActivityChangedFile {
+  filePath: string;
+  changeType: RepositoryChangeType | "Renamed";
+  additions?: number;
+  deletions?: number;
+  patch?: string;
+  possibleModule?: string;
+  riskLevel?: RepositoryRiskLevel;
+}
+
+export interface RepositoryActivity {
+  id: string;
+  workspaceId: string;
+  projectId?: string;
+  repositoryConfigId: string;
+  repositoryType: ApplicationRepositoryType | "automation";
+  provider: AutomationRepositoryProvider;
+  eventType: "push" | "pull_request";
+  action?: string;
+  repoOwner: string;
+  repoName: string;
+  branch?: string;
+  commitSha?: string;
+  previousCommitSha?: string;
+  pullRequestNumber?: number;
+  pullRequestTitle?: string;
+  pullRequestUrl?: string;
+  author?: string;
+  message?: string;
+  changedFiles: RepositoryActivityChangedFile[];
+  fileCount: number;
+  status: RepositoryActivityStatus;
+  deliveryId?: string;
+  rawMetadata?: unknown;
+  createdAt: string;
+}
+
+export interface RepositoryImpactAnalysisTest {
+  testFilePath: string;
+  relatedChangedFile: string;
+  impactReason: string;
+  suggestedAction: RepositoryImpactSuggestedAction;
+  riskLevel: RepositoryRiskLevel;
+  confidenceScore: number;
+}
+
+export interface RepositoryImpactAnalysisSuggestion {
+  title: string;
+  description: string;
+  category: RepositoryImpactSuggestionCategory;
+  priority: RepositoryRiskLevel;
+  relatedTestFile?: string;
+  relatedChangedFile?: string;
+}
+
+export interface RepositoryImpactAnalysis {
+  id: string;
+  workspaceId: string;
+  projectId?: string;
+  repositoryActivityId: string;
+  applicationRepositoryId: string;
+  automationRepositoryId?: string;
+  provider: AutomationRepositoryProvider;
+  repoOwner: string;
+  repoName: string;
+  branch?: string;
+  commitSha?: string;
+  changedFiles: RepositoryActivityChangedFile[];
+  impactedModules: string[];
+  impactedTests: RepositoryImpactAnalysisTest[];
+  suggestions: RepositoryImpactAnalysisSuggestion[];
+  riskLevel: RepositoryRiskLevel;
+  confidenceScore: number;
+  recommendation: string;
+  status: RepositoryImpactAnalysisStatus;
+  createdBy?: string;
+  createdAt: string;
+  updatedAt: string;
+}
+
+export interface RepositoryGeneratedTestUpdate {
+  id: string;
+  workspaceId: string;
+  projectId?: string;
+  impactAnalysisId: string;
+  testFilePath: string;
+  oldCode: string;
+  newCode: string;
+  updateSummary: string;
+  impactReason: string;
+  confidenceScore: number;
+  riskLevel: RepositoryRiskLevel;
+  suggestedAction: RepositoryImpactSuggestedAction;
+  status: RepositoryGeneratedTestUpdateStatus;
+  aiProvider: string;
+  aiModel: string;
+  createdBy?: string;
+  createdAt: string;
+  updatedAt: string;
+}
+
+export interface RepositoryValidationRun {
+  id: string;
+  workspaceId: string;
+  projectId?: string;
+  impactAnalysisId: string;
+  status: RepositoryValidationRunStatus;
+  totalTests: number;
+  passed: number;
+  failed: number;
+  skipped: number;
+  duration: number;
+  browser: string;
+  environment: string;
+  logs: string;
+  errorDetails?: string;
+  failureExplanation?: string;
+  screenshots: string[];
+  videos: string[];
+  reportUrl?: string;
+  createdBy?: string;
+  createdAt: string;
+  completedAt?: string;
+}
+
+export interface RepositoryUpdatePullRequest {
+  id: string;
+  workspaceId: string;
+  projectId?: string;
+  impactAnalysisId: string;
+  branchName: string;
+  pullRequestUrl?: string;
+  pullRequestNumber?: number;
+  updatedFiles: string[];
+  validationRunId?: string;
+  status: RepositoryUpdatePullRequestStatus;
+  createdBy?: string;
+  createdAt: string;
+}
+
 export interface RepositoryAnalysis {
   id: string;
   workspaceId: string;
@@ -594,6 +780,42 @@ export interface Trial {
   updatedAt: string;
 }
 
+export interface PlaywrightValidationIssue {
+  id: string;
+  severity: PlaywrightValidationSeverity;
+  category: string;
+  message: string;
+  recommendation: string;
+  line?: number;
+}
+
+export interface PlaywrightValidationResult {
+  score: number;
+  status: PlaywrightValidationStatus;
+  summary: string;
+  issues: PlaywrightValidationIssue[];
+  recommendations: string[];
+  checkedAt: string;
+  durationMs: number;
+}
+
+export interface PlaywrightValidationJob {
+  id: string;
+  workspaceId?: string;
+  projectId?: string;
+  moduleId?: string;
+  requirementId?: string;
+  requirementTitle?: string;
+  fileName: string;
+  playwrightCode: string;
+  status: PlaywrightValidationStatus;
+  result?: PlaywrightValidationResult;
+  errorMessage?: string;
+  createdBy?: string;
+  createdAt: string;
+  updatedAt: string;
+}
+
 export interface DashboardStats {
   totalProjects: number;
   activeProjects: number;
@@ -629,8 +851,15 @@ export interface ProjectDatabase {
   aiProviderFeatureMappings: AIProviderFeatureMapping[];
   aiProviderUsageLogs: AIProviderUsageLog[];
   automationRepositoryConfigs: AutomationRepositoryConfig[];
+  applicationRepositoryConfigs: ApplicationRepositoryConfig[];
+  repositoryActivities: RepositoryActivity[];
+  repositoryImpactAnalyses: RepositoryImpactAnalysis[];
+  repositoryGeneratedTestUpdates: RepositoryGeneratedTestUpdate[];
+  repositoryValidationRuns: RepositoryValidationRun[];
+  repositoryUpdatePullRequests: RepositoryUpdatePullRequest[];
   repositoryAnalyses: RepositoryAnalysis[];
   repositorySyncs: RepositorySync[];
+  playwrightValidations: PlaywrightValidationJob[];
   testRuns: TestRun[];
   testExecutions: TestExecution[];
   testExecutionHistories: TestExecutionHistory[];

@@ -1,38 +1,74 @@
 import { type RequestHandler, Router } from "express";
+import { createHmac, randomBytes, timingSafeEqual } from "node:crypto";
 import { z } from "zod";
 
 import {
   analyzeGitHubRepository,
   buildRepositorySyncPrPreview,
+  compareGitHubCommits,
+  createGitHubWebhook,
   createRepositorySyncPullRequest,
   createRepositorySyncUpdatePullRequest,
   detectRepositorySyncImpact,
   generateRepositorySyncUpdates,
   generateRepositorySyncSuggestions,
   getRepoInfo,
+  listGitHubPullRequestFiles,
   pushPlaywrightTestToGitHub,
   type GitHubAutomationConfig,
 } from "./github.service.js";
 import {
+  createAIProviderUsageLog,
+  createRepositoryActivity,
+  deleteApplicationRepositoryConfig,
+  findApplicationRepositoryRuntimeConfig,
+  getApplicationRepositoryConfig,
+  getApplicationRepositoryRuntimeConfig,
   getAutomationRepositoryConfig,
   getAutomationRepositoryRuntimeConfig,
   getCurrentWorkspaceMember,
   getRepositoryAnalysis,
+  getRepositoryActivity,
+  getRepositoryImpactAnalysis,
+  getRepositoryImpactAnalysisByActivity,
+  getRepositoryGeneratedTestUpdate,
+  getLatestRepositoryValidationRun,
   getRepositorySync,
   latestRepositorySync,
+  listApplicationRepositoryConfigs,
+  listRepositoryActivities,
+  listRepositoryGeneratedTestUpdates,
   listRepositorySyncs,
   overrideRepositoryAnalysis,
   createRepositorySync,
+  resolveAIProviderForFeature,
+  saveApplicationRepositoryConfig,
+  saveRepositoryGeneratedTestUpdates,
+  saveRepositoryUpdatePullRequest,
+  saveRepositoryValidationRun,
+  saveRepositoryImpactAnalysis,
   saveRepositoryAnalysis,
   saveAutomationRepositoryConfig,
+  updateApplicationRepositoryWebhook,
+  updateRepositoryImpactAnalysisStatus,
+  updateRepositoryGeneratedTestUpdate,
+  updateRepositoryActivityStatus,
   updateRepositorySyncGeneratedUpdates,
   updateRepositorySyncPr,
   updateRepositorySyncUpdatePr,
   updateRepositorySyncSuggestions,
 } from "./projectStore.js";
-import type { WorkspaceRole } from "./projectTypes.js";
+import { analyzeRepositoryImpact } from "./repositoryImpactAnalysisService.js";
+import {
+  buildFailureSuggestion,
+  createImpactUpdatePullRequest,
+  generateRepositoryTestUpdates,
+  validateRepositoryTestUpdates,
+} from "./repositoryTestUpdateService.js";
+import type { RepositoryActivityChangedFile, RepositoryChangeType, RepositoryRiskLevel, WorkspaceRole } from "./projectTypes.js";
 
 export const integrationRouter = Router();
+export const githubWebhookRouter = Router();
 
 const GitHubConfigSchema = z.object({
   workspaceId: z.string().min(1),
@@ -41,6 +77,17 @@ const GitHubConfigSchema = z.object({
   repo: z.string().trim().min(1),
   defaultBranch: z.string().trim().min(1).default("main"),
   testFolderPath: z.string().trim().min(1).default("tests/e2e"),
+});
+
+const ApplicationRepoSchema = z.object({
+  workspaceId: z.string().min(1),
+  projectId: z.string().optional(),
+  repositoryType: z.enum(["frontend", "backend"]),
+  token: z.string().trim().min(20, "GitHub token is required."),
+  owner: z.string().trim().min(1),
+  repo: z.string().trim().min(1),
+  defaultBranch: z.string().trim().min(1).default("main"),
+  webhookSecret: z.string().trim().optional(),
 });
 
 const PushPlaywrightSchema = z.object({
@@ -105,6 +152,79 @@ function toGitHubConfig(config: Awaited<ReturnType<typeof getAutomationRepositor
   };
 }
 
+function backendPublicUrl() {
+  return (process.env.BACKEND_PUBLIC_URL || process.env.RENDER_EXTERNAL_URL || `http://localhost:${process.env.PORT ?? 4000}`)
+    .replace(/\/$/, "");
+}
+
+function webhookUrl() {
+  return `${backendPublicUrl()}/api/integrations/github/webhook`;
+}
+
+function generateWebhookSecret() {
+  return `whsec_${randomBytes(24).toString("hex")}`;
+}
+
+function verifyGitHubSignature(rawBody: Buffer, secret: string, signatureHeader?: string) {
+  if (!signatureHeader?.startsWith("sha256=")) return false;
+  const expected = `sha256=${createHmac("sha256", secret).update(rawBody).digest("hex")}`;
+  const actualBuffer = Buffer.from(signatureHeader);
+  const expectedBuffer = Buffer.from(expected);
+  return actualBuffer.length === expectedBuffer.length && timingSafeEqual(actualBuffer, expectedBuffer);
+}
+
+function changeTypeFromGitHub(status?: string): RepositoryActivityChangedFile["changeType"] {
+  if (status === "added") return "Added";
+  if (status === "removed") return "Deleted";
+  if (status === "renamed") return "Renamed";
+  return "Modified";
+}
+
+function possibleModuleFromPath(filePath: string) {
+  const parts = filePath.split("/").filter(Boolean);
+  const filename = parts.at(-1)?.replace(/\.[^.]+$/, "") ?? filePath;
+  if (parts.includes("auth")) return "auth";
+  if (parts.includes("checkout")) return "checkout";
+  if (parts.includes("payment")) return "payment";
+  if (parts.includes("api")) return "api";
+  return parts.length > 1 ? parts.at(-2) ?? filename : filename;
+}
+
+function riskFromPath(filePath: string): RepositoryRiskLevel {
+  if (/auth|checkout|payment|routing|route|api|config|security|permission/i.test(filePath)) return "High";
+  if (/components?|pages?|forms?|views?|screens?/i.test(filePath)) return "Medium";
+  return "Low";
+}
+
+function mapGitHubFiles(files: Array<{
+  filename: string;
+  status?: string;
+  additions?: number;
+  deletions?: number;
+  patch?: string;
+  previous_filename?: string;
+}>): RepositoryActivityChangedFile[] {
+  return files.map((file) => ({
+    filePath: file.filename,
+    changeType: changeTypeFromGitHub(file.status),
+    additions: file.additions,
+    deletions: file.deletions,
+    patch: file.patch,
+    possibleModule: possibleModuleFromPath(file.filename),
+    riskLevel: riskFromPath(file.filename),
+  }));
+}
+
+function runtimeToGitHubConfig(config: NonNullable<Awaited<ReturnType<typeof getApplicationRepositoryRuntimeConfig>>>): GitHubAutomationConfig {
+  return {
+    token: config.token,
+    owner: config.owner,
+    repo: config.repo,
+    defaultBranch: config.defaultBranch,
+    testFolderPath: "",
+  };
+}
+
 integrationRouter.post("/integrations/github/connect", asyncRoute(async (request, response) => {
   const input = GitHubConfigSchema.parse(request.body);
   if (!(await requireWorkspaceRole(request, response, input.workspaceId, ["Owner", "Admin"]))) return;
@@ -129,6 +249,429 @@ integrationRouter.post("/integrations/github/test-connection", asyncRoute(async 
     defaultBranch: repo.default_branch,
     url: repo.html_url,
   });
+}));
+
+integrationRouter.post("/integrations/github/application-repos/connect", asyncRoute(async (request, response) => {
+  const input = ApplicationRepoSchema.parse(request.body);
+  if (!(await requireWorkspaceRole(request, response, input.workspaceId, ["Owner", "Admin"]))) return;
+  const secret = input.webhookSecret?.trim() || generateWebhookSecret();
+  const targetWebhookUrl = webhookUrl();
+  let webhookStatus: "Connected" | "Failed" | "Pending" = "Pending";
+  let webhookError: string | undefined;
+  let webhookId: number | undefined;
+  try {
+    const hook = await createGitHubWebhook({
+      token: input.token,
+      owner: input.owner,
+      repo: input.repo,
+      defaultBranch: input.defaultBranch,
+      testFolderPath: "",
+    }, {
+      webhookUrl: targetWebhookUrl,
+      secret,
+    });
+    webhookStatus = hook.active ? "Connected" : "Pending";
+    webhookId = hook.id;
+  } catch (error) {
+    webhookStatus = "Failed";
+    webhookError = error instanceof Error ? error.message : "Webhook registration failed.";
+  }
+  const saved = await saveApplicationRepositoryConfig({
+    ...input,
+    webhookSecret: secret,
+    webhookUrl: targetWebhookUrl,
+    webhookStatus,
+    webhookError,
+    webhookId,
+    userId: request.userId,
+  });
+  response.status(201).json({
+    ...saved,
+    manualSetup: webhookStatus === "Failed"
+      ? {
+          webhookUrl: targetWebhookUrl,
+          contentType: "application/json",
+          secret: saved.webhookSecretMasked,
+          events: ["push", "pull_request"],
+          message: "Automatic webhook registration failed. Add this webhook manually in GitHub repository settings.",
+        }
+      : undefined,
+  });
+}));
+
+integrationRouter.get("/integrations/github/application-repos", asyncRoute(async (request, response) => {
+  const { workspaceId } = z.object({ workspaceId: z.string().min(1) }).parse(request.query);
+  if (!(await requireWorkspaceRole(request, response, workspaceId, ["Owner", "Admin", "QA Lead", "QA Engineer", "Viewer"]))) return;
+  response.json(await listApplicationRepositoryConfigs(workspaceId));
+}));
+
+integrationRouter.get("/integrations/github/application-repos/:id", asyncRoute(async (request, response) => {
+  const config = await getApplicationRepositoryConfig(String(request.params.id));
+  if (!config) {
+    response.status(404).json({ message: "Application repository config not found." });
+    return;
+  }
+  if (!(await requireWorkspaceRole(request, response, config.workspaceId, ["Owner", "Admin", "QA Lead", "QA Engineer", "Viewer"]))) return;
+  response.json(config);
+}));
+
+integrationRouter.post("/integrations/github/application-repos/:id/test-connection", asyncRoute(async (request, response) => {
+  const config = await getApplicationRepositoryRuntimeConfig(String(request.params.id));
+  if (!config) {
+    response.status(404).json({ message: "Application repository config not found." });
+    return;
+  }
+  if (!(await requireWorkspaceRole(request, response, config.workspaceId, ["Owner", "Admin"]))) return;
+  const repo = await getRepoInfo(runtimeToGitHubConfig(config));
+  response.json({ ok: true, repository: repo.full_name, defaultBranch: repo.default_branch, url: repo.html_url });
+}));
+
+integrationRouter.post("/integrations/github/application-repos/:id/register-webhook", asyncRoute(async (request, response) => {
+  const config = await getApplicationRepositoryRuntimeConfig(String(request.params.id));
+  if (!config) {
+    response.status(404).json({ message: "Application repository config not found." });
+    return;
+  }
+  if (!(await requireWorkspaceRole(request, response, config.workspaceId, ["Owner", "Admin"]))) return;
+  try {
+    const hook = await createGitHubWebhook(runtimeToGitHubConfig(config), {
+      webhookUrl: config.webhookUrl || webhookUrl(),
+      secret: config.webhookSecret,
+    });
+    response.json(await updateApplicationRepositoryWebhook({
+      configId: config.id,
+      webhookStatus: hook.active ? "Connected" : "Pending",
+      webhookId: hook.id,
+      webhookUrl: config.webhookUrl || webhookUrl(),
+      webhookError: undefined,
+      userId: request.userId,
+    }));
+  } catch (error) {
+    const updated = await updateApplicationRepositoryWebhook({
+      configId: config.id,
+      webhookStatus: "Failed",
+      webhookError: error instanceof Error ? error.message : "Webhook registration failed.",
+      userId: request.userId,
+    });
+    response.status(400).json({
+      message: "Automatic webhook registration failed.",
+      config: updated,
+      manualSetup: {
+        webhookUrl: config.webhookUrl || webhookUrl(),
+        contentType: "application/json",
+        secret: config.webhookSecretMasked,
+        events: ["push", "pull_request"],
+      },
+    });
+  }
+}));
+
+integrationRouter.delete("/integrations/github/application-repos/:id", asyncRoute(async (request, response) => {
+  const config = await getApplicationRepositoryConfig(String(request.params.id));
+  if (!config) {
+    response.status(404).json({ message: "Application repository config not found." });
+    return;
+  }
+  if (!(await requireWorkspaceRole(request, response, config.workspaceId, ["Owner", "Admin"]))) return;
+  await deleteApplicationRepositoryConfig(config.id);
+  response.status(204).end();
+}));
+
+integrationRouter.get("/integrations/github/repository-activity", asyncRoute(async (request, response) => {
+  const filters = z.object({
+    workspaceId: z.string().min(1),
+    repositoryConfigId: z.string().optional(),
+    status: z.enum(["New", "Reviewed", "Ignored"]).optional(),
+  }).parse(request.query);
+  if (!(await requireWorkspaceRole(request, response, filters.workspaceId, ["Owner", "Admin", "QA Lead", "QA Engineer", "Viewer"]))) return;
+  response.json(await listRepositoryActivities(filters));
+}));
+
+integrationRouter.get("/integrations/github/repository-activity/:id", asyncRoute(async (request, response) => {
+  const activity = await getRepositoryActivity(String(request.params.id));
+  if (!activity) {
+    response.status(404).json({ message: "Repository activity not found." });
+    return;
+  }
+  if (!(await requireWorkspaceRole(request, response, activity.workspaceId, ["Owner", "Admin", "QA Lead", "QA Engineer", "Viewer"]))) return;
+  response.json(activity);
+}));
+
+integrationRouter.patch("/integrations/github/repository-activity/:id/status", asyncRoute(async (request, response) => {
+  const input = z.object({ status: z.enum(["New", "Reviewed", "Ignored"]) }).parse(request.body);
+  const activity = await getRepositoryActivity(String(request.params.id));
+  if (!activity) {
+    response.status(404).json({ message: "Repository activity not found." });
+    return;
+  }
+  if (!(await requireWorkspaceRole(request, response, activity.workspaceId, ["Owner", "Admin", "QA Lead", "QA Engineer"]))) return;
+  response.json(await updateRepositoryActivityStatus(activity.id, input.status));
+}));
+
+async function runImpactAnalysisForActivity(activityId: string, createdBy?: string, replaceExisting = false) {
+  const activity = await getRepositoryActivity(activityId);
+  if (!activity) return null;
+  const [automationConfig, repositoryAnalysis, provider] = await Promise.all([
+    getAutomationRepositoryConfig(activity.workspaceId),
+    getRepositoryAnalysis(activity.workspaceId),
+    resolveAIProviderForFeature(activity.workspaceId, "repository-impact"),
+  ]);
+  const analysis = analyzeRepositoryImpact({
+    activity,
+    automationConfig,
+    repositoryAnalysis,
+    createdBy,
+  });
+  const saved = await saveRepositoryImpactAnalysis(analysis, { replaceExisting });
+  await createAIProviderUsageLog({
+    workspaceId: activity.workspaceId,
+    providerType: provider?.providerType ?? "default",
+    providerName: provider?.providerName ?? "AI QA Copilot Default AI",
+    modelName: provider?.modelName ?? process.env.GROQ_MODEL ?? "llama-3.3-70b-versatile",
+    featureName: "repository-impact",
+    tokenUsage: 0,
+    status: "Success",
+    createdBy,
+  });
+  return saved;
+}
+
+integrationRouter.post("/integrations/github/repository-activity/:activityId/impact-analysis", asyncRoute(async (request, response) => {
+  const activity = await getRepositoryActivity(String(request.params.activityId));
+  if (!activity) {
+    response.status(404).json({ message: "Repository activity not found." });
+    return;
+  }
+  if (!(await requireWorkspaceRole(request, response, activity.workspaceId, ["Owner", "Admin", "QA Lead", "QA Engineer"]))) return;
+  const existing = await getRepositoryImpactAnalysisByActivity(activity.id);
+  if (existing) {
+    response.json(existing);
+    return;
+  }
+  response.status(201).json(await runImpactAnalysisForActivity(activity.id, request.userId));
+}));
+
+integrationRouter.get("/integrations/github/repository-activity/:activityId/impact-analysis", asyncRoute(async (request, response) => {
+  const activity = await getRepositoryActivity(String(request.params.activityId));
+  if (!activity) {
+    response.status(404).json({ message: "Repository activity not found." });
+    return;
+  }
+  if (!(await requireWorkspaceRole(request, response, activity.workspaceId, ["Owner", "Admin", "QA Lead", "QA Engineer", "Viewer"]))) return;
+  const analysis = await getRepositoryImpactAnalysisByActivity(activity.id);
+  if (!analysis) {
+    response.status(404).json({ message: "Impact analysis not found." });
+    return;
+  }
+  response.json(analysis);
+}));
+
+integrationRouter.post("/integrations/github/repository-activity/:activityId/impact-analysis/regenerate", asyncRoute(async (request, response) => {
+  const activity = await getRepositoryActivity(String(request.params.activityId));
+  if (!activity) {
+    response.status(404).json({ message: "Repository activity not found." });
+    return;
+  }
+  if (!(await requireWorkspaceRole(request, response, activity.workspaceId, ["Owner", "Admin", "QA Lead", "QA Engineer"]))) return;
+  response.json(await runImpactAnalysisForActivity(activity.id, request.userId, true));
+}));
+
+integrationRouter.patch("/integrations/github/impact-analysis/:impactAnalysisId/status", asyncRoute(async (request, response) => {
+  const input = z.object({ status: z.enum(["Pending", "Completed", "Failed", "Reviewed"]) }).parse(request.body);
+  const analysis = await getRepositoryImpactAnalysis(String(request.params.impactAnalysisId));
+  if (!analysis) {
+    response.status(404).json({ message: "Impact analysis not found." });
+    return;
+  }
+  if (!(await requireWorkspaceRole(request, response, analysis.workspaceId, ["Owner", "Admin", "QA Lead", "QA Engineer"]))) return;
+  response.json(await updateRepositoryImpactAnalysisStatus(analysis.id, input.status));
+}));
+
+integrationRouter.post("/integrations/github/impact-analysis/:impactAnalysisId/generate-test-updates", asyncRoute(async (request, response) => {
+  const analysis = await getRepositoryImpactAnalysis(String(request.params.impactAnalysisId));
+  if (!analysis) {
+    response.status(404).json({ message: "Impact analysis not found." });
+    return;
+  }
+  if (!(await requireWorkspaceRole(request, response, analysis.workspaceId, ["Owner", "Admin", "QA Lead", "QA Engineer"]))) return;
+  const runtimeConfig = await getAutomationRepositoryRuntimeConfig(analysis.workspaceId);
+  if (!runtimeConfig) {
+    response.status(400).json({ message: "Configure the automation repository before generating test updates." });
+    return;
+  }
+  const provider = await resolveAIProviderForFeature(analysis.workspaceId, "repository-test-update");
+  const updates = await generateRepositoryTestUpdates({
+    impactAnalysis: analysis,
+    automationConfig: toGitHubConfig(runtimeConfig),
+    aiProvider: provider?.providerName ?? "AI QA Copilot Default AI",
+    aiModel: provider?.modelName ?? process.env.GROQ_MODEL ?? "llama-3.3-70b-versatile",
+    createdBy: request.userId,
+  });
+  await createAIProviderUsageLog({
+    workspaceId: analysis.workspaceId,
+    providerType: provider?.providerType ?? "default",
+    providerName: provider?.providerName ?? "AI QA Copilot Default AI",
+    modelName: provider?.modelName ?? process.env.GROQ_MODEL ?? "llama-3.3-70b-versatile",
+    featureName: "repository-test-update",
+    tokenUsage: 0,
+    status: "Success",
+    createdBy: request.userId,
+  });
+  response.status(201).json(await saveRepositoryGeneratedTestUpdates(analysis.id, updates));
+}));
+
+integrationRouter.get("/integrations/github/impact-analysis/:impactAnalysisId/test-updates", asyncRoute(async (request, response) => {
+  const analysis = await getRepositoryImpactAnalysis(String(request.params.impactAnalysisId));
+  if (!analysis) {
+    response.status(404).json({ message: "Impact analysis not found." });
+    return;
+  }
+  if (!(await requireWorkspaceRole(request, response, analysis.workspaceId, ["Owner", "Admin", "QA Lead", "QA Engineer", "Viewer"]))) return;
+  response.json(await listRepositoryGeneratedTestUpdates(analysis.id));
+}));
+
+integrationRouter.patch("/integrations/github/test-updates/:updateId/approve", asyncRoute(async (request, response) => {
+  const update = await getRepositoryGeneratedTestUpdate(String(request.params.updateId));
+  if (!update) {
+    response.status(404).json({ message: "Generated test update not found." });
+    return;
+  }
+  if (!(await requireWorkspaceRole(request, response, update.workspaceId, ["Owner", "Admin", "QA Lead", "QA Engineer"]))) return;
+  response.json(await updateRepositoryGeneratedTestUpdate(update.id, { status: "Approved" }));
+}));
+
+integrationRouter.patch("/integrations/github/test-updates/:updateId/reject", asyncRoute(async (request, response) => {
+  const update = await getRepositoryGeneratedTestUpdate(String(request.params.updateId));
+  if (!update) {
+    response.status(404).json({ message: "Generated test update not found." });
+    return;
+  }
+  if (!(await requireWorkspaceRole(request, response, update.workspaceId, ["Owner", "Admin", "QA Lead", "QA Engineer"]))) return;
+  response.json(await updateRepositoryGeneratedTestUpdate(update.id, { status: "Rejected" }));
+}));
+
+integrationRouter.patch("/integrations/github/test-updates/:updateId/edit", asyncRoute(async (request, response) => {
+  const body = z.object({ newCode: z.string().min(1), updateSummary: z.string().optional() }).parse(request.body);
+  const update = await getRepositoryGeneratedTestUpdate(String(request.params.updateId));
+  if (!update) {
+    response.status(404).json({ message: "Generated test update not found." });
+    return;
+  }
+  if (!(await requireWorkspaceRole(request, response, update.workspaceId, ["Owner", "Admin", "QA Lead", "QA Engineer"]))) return;
+  response.json(await updateRepositoryGeneratedTestUpdate(update.id, {
+    status: "Edited",
+    newCode: body.newCode,
+    updateSummary: body.updateSummary ?? update.updateSummary,
+  }));
+}));
+
+integrationRouter.post("/integrations/github/test-updates/:updateId/regenerate", asyncRoute(async (request, response) => {
+  const update = await getRepositoryGeneratedTestUpdate(String(request.params.updateId));
+  if (!update) {
+    response.status(404).json({ message: "Generated test update not found." });
+    return;
+  }
+  if (!(await requireWorkspaceRole(request, response, update.workspaceId, ["Owner", "Admin", "QA Lead", "QA Engineer"]))) return;
+  const regenerated = `${update.newCode.trimEnd()}\n\n// Regenerated by AI QA Copilot on ${new Date().toISOString()}\n`;
+  response.json(await updateRepositoryGeneratedTestUpdate(update.id, {
+    status: "Pending",
+    newCode: regenerated,
+    updateSummary: `${update.updateSummary} (regenerated)`,
+    confidenceScore: Math.min(99, update.confidenceScore + 2),
+  }));
+}));
+
+integrationRouter.post("/integrations/github/impact-analysis/:impactAnalysisId/run-validation", asyncRoute(async (request, response) => {
+  const analysis = await getRepositoryImpactAnalysis(String(request.params.impactAnalysisId));
+  if (!analysis) {
+    response.status(404).json({ message: "Impact analysis not found." });
+    return;
+  }
+  if (!(await requireWorkspaceRole(request, response, analysis.workspaceId, ["Owner", "Admin", "QA Lead", "QA Engineer"]))) return;
+  const updates = await listRepositoryGeneratedTestUpdates(analysis.id);
+  const run = await validateRepositoryTestUpdates({ impactAnalysis: analysis, updates, createdBy: request.userId });
+  response.status(201).json(await saveRepositoryValidationRun(run));
+}));
+
+integrationRouter.get("/integrations/github/impact-analysis/:impactAnalysisId/validation-result", asyncRoute(async (request, response) => {
+  const analysis = await getRepositoryImpactAnalysis(String(request.params.impactAnalysisId));
+  if (!analysis) {
+    response.status(404).json({ message: "Impact analysis not found." });
+    return;
+  }
+  if (!(await requireWorkspaceRole(request, response, analysis.workspaceId, ["Owner", "Admin", "QA Lead", "QA Engineer", "Viewer"]))) return;
+  const run = await getLatestRepositoryValidationRun(analysis.id);
+  if (!run) {
+    response.status(404).json({ message: "Validation result not found." });
+    return;
+  }
+  response.json(run);
+}));
+
+integrationRouter.post("/integrations/github/impact-analysis/:impactAnalysisId/generate-fix-suggestion", asyncRoute(async (request, response) => {
+  const analysis = await getRepositoryImpactAnalysis(String(request.params.impactAnalysisId));
+  if (!analysis) {
+    response.status(404).json({ message: "Impact analysis not found." });
+    return;
+  }
+  if (!(await requireWorkspaceRole(request, response, analysis.workspaceId, ["Owner", "Admin", "QA Lead", "QA Engineer"]))) return;
+  const run = await getLatestRepositoryValidationRun(analysis.id);
+  if (!run) {
+    response.status(400).json({ message: "Run validation before generating a fix suggestion." });
+    return;
+  }
+  const provider = await resolveAIProviderForFeature(analysis.workspaceId, "repository-fix-suggestion");
+  await createAIProviderUsageLog({
+    workspaceId: analysis.workspaceId,
+    providerType: provider?.providerType ?? "default",
+    providerName: provider?.providerName ?? "AI QA Copilot Default AI",
+    modelName: provider?.modelName ?? process.env.GROQ_MODEL ?? "llama-3.3-70b-versatile",
+    featureName: "repository-fix-suggestion",
+    tokenUsage: 0,
+    status: "Success",
+    createdBy: request.userId,
+  });
+  response.json({ suggestion: buildFailureSuggestion(run) });
+}));
+
+integrationRouter.post("/integrations/github/impact-analysis/:impactAnalysisId/create-pr", asyncRoute(async (request, response) => {
+  const analysis = await getRepositoryImpactAnalysis(String(request.params.impactAnalysisId));
+  if (!analysis) {
+    response.status(404).json({ message: "Impact analysis not found." });
+    return;
+  }
+  if (!(await requireWorkspaceRole(request, response, analysis.workspaceId, ["Owner", "Admin", "QA Lead"]))) return;
+  const runtimeConfig = await getAutomationRepositoryRuntimeConfig(analysis.workspaceId);
+  if (!runtimeConfig) {
+    response.status(400).json({ message: "Configure the automation repository before creating a PR." });
+    return;
+  }
+  const updates = await listRepositoryGeneratedTestUpdates(analysis.id);
+  const approvedUpdates = updates.filter((update) => update.status === "Approved" || update.status === "Edited");
+  if (!approvedUpdates.length) {
+    response.status(400).json({ message: "Approve at least one generated test update before creating a PR." });
+    return;
+  }
+  const validationRun = await getLatestRepositoryValidationRun(analysis.id);
+  const pr = await createImpactUpdatePullRequest({
+    impactAnalysis: analysis,
+    automationConfig: toGitHubConfig(runtimeConfig),
+    approvedUpdates,
+    validationRun,
+  });
+  const saved = await saveRepositoryUpdatePullRequest({
+    workspaceId: analysis.workspaceId,
+    projectId: analysis.projectId,
+    impactAnalysisId: analysis.id,
+    branchName: pr.branchName,
+    pullRequestUrl: pr.html_url,
+    pullRequestNumber: pr.number,
+    updatedFiles: pr.updatedFiles,
+    validationRunId: validationRun?.id,
+    status: "Created",
+    createdBy: request.userId,
+  });
+  response.status(201).json({ ...saved, pullRequest: pr });
 }));
 
 integrationRouter.post("/integrations/github/analyze-repository", asyncRoute(async (request, response) => {
@@ -346,4 +889,122 @@ integrationRouter.post("/integrations/github/push-playwright-test", asyncRoute(a
     repositoryAnalysis: analysis,
   });
   response.status(201).json(result);
+}));
+
+githubWebhookRouter.post("/integrations/github/webhook", asyncRoute(async (request, response) => {
+  const eventType = request.header("x-github-event");
+  const deliveryId = request.header("x-github-delivery") ?? undefined;
+  if (eventType !== "push" && eventType !== "pull_request") {
+    response.status(202).json({ ok: true, ignored: true });
+    return;
+  }
+
+  const payload = request.body as {
+    repository?: { name?: string; owner?: { login?: string }; full_name?: string };
+    ref?: string;
+    before?: string;
+    after?: string;
+    head_commit?: { message?: string; author?: { name?: string; username?: string } };
+    commits?: Array<{ added?: string[]; modified?: string[]; removed?: string[] }>;
+    action?: string;
+    pull_request?: {
+      number?: number;
+      title?: string;
+      html_url?: string;
+      state?: string;
+      user?: { login?: string };
+      head?: { ref?: string };
+      base?: { ref?: string };
+    };
+  };
+  const repoOwner = payload.repository?.owner?.login;
+  const repoName = payload.repository?.name;
+  if (!repoOwner || !repoName) {
+    response.status(400).json({ message: "Repository payload is missing." });
+    return;
+  }
+
+  const config = await findApplicationRepositoryRuntimeConfig({ owner: repoOwner, repo: repoName });
+  if (!config) {
+    response.status(404).json({ message: "Repository is not connected in AI QA Copilot." });
+    return;
+  }
+
+  const rawBody = (request as typeof request & { rawBody?: Buffer }).rawBody ?? Buffer.from(JSON.stringify(request.body));
+  if (!verifyGitHubSignature(rawBody, config.webhookSecret, request.header("x-hub-signature-256") ?? undefined)) {
+    response.status(401).json({ message: "Invalid GitHub webhook signature." });
+    return;
+  }
+
+  const gitHubConfig = runtimeToGitHubConfig(config);
+  let changedFiles: RepositoryActivityChangedFile[] = [];
+  let branch = payload.ref?.replace("refs/heads/", "");
+  let commitSha = payload.after;
+  let previousCommitSha = payload.before;
+  let pullRequestNumber: number | undefined;
+  let pullRequestTitle: string | undefined;
+  let pullRequestUrl: string | undefined;
+  let author = payload.head_commit?.author?.username || payload.head_commit?.author?.name;
+  let message = payload.head_commit?.message;
+
+  if (eventType === "push") {
+    const filesFromPayload = payload.commits?.flatMap((commit) => [
+      ...(commit.added ?? []).map((filename) => ({ filename, status: "added" })),
+      ...(commit.modified ?? []).map((filename) => ({ filename, status: "modified" })),
+      ...(commit.removed ?? []).map((filename) => ({ filename, status: "removed" })),
+    ]) ?? [];
+    changedFiles = mapGitHubFiles(filesFromPayload);
+    if (previousCommitSha && commitSha) {
+      try {
+        const comparison = await compareGitHubCommits(gitHubConfig, previousCommitSha, commitSha);
+        if (comparison.files?.length) changedFiles = mapGitHubFiles(comparison.files);
+      } catch {
+        // Payload file paths are enough for Sprint 1 if compare is unavailable.
+      }
+    }
+  } else if (payload.pull_request) {
+    pullRequestNumber = payload.pull_request.number;
+    pullRequestTitle = payload.pull_request.title;
+    pullRequestUrl = payload.pull_request.html_url;
+    branch = payload.pull_request.head?.ref;
+    author = payload.pull_request.user?.login;
+    message = `${payload.action ?? "pull_request"} ${payload.pull_request.state ?? ""}`.trim();
+    if (pullRequestNumber) {
+      try {
+        changedFiles = mapGitHubFiles(await listGitHubPullRequestFiles(gitHubConfig, pullRequestNumber));
+      } catch {
+        changedFiles = [];
+      }
+    }
+  }
+
+  const activity = await createRepositoryActivity({
+    workspaceId: config.workspaceId,
+    projectId: config.projectId,
+    repositoryConfigId: config.id,
+    repositoryType: config.repositoryType,
+    provider: "github",
+    eventType,
+    action: payload.action,
+    repoOwner,
+    repoName,
+    branch,
+    commitSha,
+    previousCommitSha,
+    pullRequestNumber,
+    pullRequestTitle,
+    pullRequestUrl,
+    author,
+    message,
+    changedFiles,
+    fileCount: changedFiles.length,
+    deliveryId,
+    rawMetadata: {
+      repository: payload.repository?.full_name,
+      ref: payload.ref,
+      eventType,
+      action: payload.action,
+    },
+  });
+  response.status(202).json({ ok: true, activityId: activity.id });
 }));
