@@ -13,8 +13,15 @@ import {
   createBranch,
   createOrReplaceFile,
   createPullRequest,
+  fileExists,
+  getWorkflowRun,
+  listWorkflowRunJobs,
+  listWorkflowRuns,
   readRepositoryFile,
+  triggerWorkflowDispatch,
 } from "./github.service.js";
+
+const PLAYWRIGHT_VALIDATION_WORKFLOW = ".github/workflows/playwright-validation.yml";
 
 function slugify(value: string) {
   return value
@@ -181,6 +188,127 @@ export async function validateRepositoryTestUpdates(input: {
     jsonReportPath: result.jsonReportPath,
     htmlReportPath: result.htmlReportPath,
     jsonReportData: result.jsonReportData,
+    createdBy: input.createdBy,
+    completedAt: new Date().toISOString(),
+  };
+}
+
+export async function validateRepositoryTestUpdatesWithGitHubActions(input: {
+  impactAnalysis: RepositoryImpactAnalysis;
+  updates: RepositoryGeneratedTestUpdate[];
+  automationConfig: GitHubAutomationConfig;
+  createdBy?: string;
+}): Promise<Omit<RepositoryValidationRun, "id" | "createdAt">> {
+  const started = Date.now();
+  const approved = input.updates.filter((update) => update.status === "Approved" || update.status === "Edited");
+  if (!approved.length) {
+    return {
+      workspaceId: input.impactAnalysis.workspaceId,
+      projectId: input.impactAnalysis.projectId,
+      impactAnalysisId: input.impactAnalysis.id,
+      status: "Failed",
+      totalTests: 0,
+      passed: 0,
+      failed: 0,
+      skipped: 0,
+      duration: Date.now() - started,
+      browser: "GitHub Actions",
+      environment: "github-actions",
+      command: "workflow_dispatch",
+      logs: "No approved or edited Playwright updates were available for GitHub Actions validation.",
+      stdout: "",
+      stderr: "",
+      failedTestNames: [],
+      failedTests: [],
+      errorDetails: "Approve or edit at least one generated test update before running validation.",
+      screenshots: [],
+      videos: [],
+      traceFiles: [],
+      validationProvider: "github-actions",
+      createdBy: input.createdBy,
+      completedAt: new Date().toISOString(),
+    };
+  }
+
+  const workflowExists = await fileExists(input.automationConfig, PLAYWRIGHT_VALIDATION_WORKFLOW);
+  if (!workflowExists) {
+    throw new Error(
+      `GitHub Actions workflow not found at ${PLAYWRIGHT_VALIDATION_WORKFLOW}. Add this workflow to the automation repository default branch, then run validation again.`,
+    );
+  }
+
+  const branchName = `aiqa/validation-${uniqueSuffix()}`;
+  await createBranch(input.automationConfig, branchName);
+
+  for (const update of approved) {
+    await createOrReplaceFile(input.automationConfig, {
+      branchName,
+      filePath: update.testFilePath,
+      content: update.newCode,
+      message: `AI QA Copilot: validate ${update.testFilePath}`,
+    });
+  }
+
+  const testFiles = approved.map((update) => update.testFilePath).join(",");
+  await triggerWorkflowDispatch(input.automationConfig, {
+    workflowId: "playwright-validation.yml",
+    ref: branchName,
+    inputs: {
+      test_files: testFiles,
+      validation_branch: branchName,
+    },
+  });
+
+  const workflowRun = await waitForWorkflowRun(input.automationConfig, branchName);
+  const completedRun = await waitForWorkflowCompletion(input.automationConfig, workflowRun.id);
+  const jobs = await listWorkflowRunJobs(input.automationConfig, completedRun.id).catch(() => ({ jobs: [] }));
+  const logs = summarizeWorkflowJobs(jobs.jobs);
+  const failedTests = jobs.jobs
+    .filter((job) => job.conclusion && job.conclusion !== "success" && job.conclusion !== "skipped")
+    .map((job) => ({
+      testFile: testFiles || "GitHub Actions workflow",
+      testName: job.name,
+      errorMessage: `GitHub Actions job concluded with ${job.conclusion}. Open the workflow logs for details.`,
+      duration: durationBetween(job.started_at, job.completed_at),
+      suggestedAction: "Open the workflow run, review failing Playwright logs, then edit or regenerate the proposed update.",
+    }));
+
+  const conclusion = completedRun.conclusion ?? "unknown";
+  const passed = conclusion === "success" ? approved.length : 0;
+  const skipped = conclusion === "skipped" ? approved.length : 0;
+  const failed = conclusion === "success" || conclusion === "skipped" ? 0 : Math.max(1, failedTests.length || approved.length);
+
+  return {
+    workspaceId: input.impactAnalysis.workspaceId,
+    projectId: input.impactAnalysis.projectId,
+    impactAnalysisId: input.impactAnalysis.id,
+    status: conclusion === "success" ? "Passed" : "Failed",
+    totalTests: Math.max(approved.length, passed + failed + skipped),
+    passed,
+    failed,
+    skipped,
+    duration: Date.now() - started,
+    browser: "GitHub Actions",
+    environment: "github-actions",
+    command: `workflow_dispatch ${PLAYWRIGHT_VALIDATION_WORKFLOW} on ${branchName}`,
+    logs,
+    stdout: logs,
+    stderr: conclusion === "success" ? "" : `Workflow concluded with ${conclusion}.`,
+    failedTestNames: failedTests.map((test) => test.testName),
+    failedTests,
+    errorDetails: conclusion === "success" ? undefined : `GitHub Actions validation workflow concluded with ${conclusion}.`,
+    failureExplanation: conclusion === "success"
+      ? undefined
+      : "GitHub Actions ran the approved Playwright updates and reported a non-success conclusion. Review workflow logs before creating a pull request.",
+    screenshots: [],
+    videos: [],
+    traceFiles: [],
+    reportUrl: completedRun.html_url,
+    validationProvider: "github-actions",
+    validationBranchName: branchName,
+    workflowRunId: completedRun.id,
+    workflowRunUrl: completedRun.html_url,
+    workflowConclusion: conclusion,
     createdBy: input.createdBy,
     completedAt: new Date().toISOString(),
   };
@@ -783,6 +911,51 @@ async function walkFiles(root: string): Promise<string[]> {
   } catch {
     return [];
   }
+}
+
+async function waitForWorkflowRun(config: GitHubAutomationConfig, branchName: string) {
+  for (let attempt = 0; attempt < 30; attempt += 1) {
+    await delay(3000);
+    const runs = await listWorkflowRuns(config, {
+      workflowId: "playwright-validation.yml",
+      branch: branchName,
+    });
+    const run = runs.workflow_runs[0];
+    if (run) return run;
+  }
+  throw new Error("GitHub Actions workflow was dispatched, but no workflow run was found for the validation branch.");
+}
+
+async function waitForWorkflowCompletion(config: GitHubAutomationConfig, runId: number) {
+  for (let attempt = 0; attempt < 120; attempt += 1) {
+    const run = await getWorkflowRun(config, runId);
+    if (run.status === "completed") return run;
+    await delay(5000);
+  }
+  throw new Error("GitHub Actions validation did not finish before the timeout.");
+}
+
+function delay(ms: number) {
+  return new Promise((resolve) => setTimeout(resolve, ms));
+}
+
+function durationBetween(start?: string | null, end?: string | null) {
+  if (!start || !end) return 0;
+  return Math.max(0, new Date(end).getTime() - new Date(start).getTime());
+}
+
+function summarizeWorkflowJobs(jobs: Awaited<ReturnType<typeof listWorkflowRunJobs>>["jobs"]) {
+  if (!jobs.length) return "GitHub Actions workflow completed. Job details were not available.";
+  return jobs.map((job) => {
+    const steps = job.steps?.map((step) => `    - ${step.name}: ${step.conclusion ?? step.status}`).join("\n") ?? "";
+    return [
+      `Job: ${job.name}`,
+      `Status: ${job.status}`,
+      `Conclusion: ${job.conclusion ?? "pending"}`,
+      `URL: ${job.html_url}`,
+      steps ? `Steps:\n${steps}` : "",
+    ].filter(Boolean).join("\n");
+  }).join("\n\n");
 }
 
 export function buildFailureSuggestion(run: RepositoryValidationRun) {

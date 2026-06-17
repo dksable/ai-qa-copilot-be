@@ -617,6 +617,11 @@ export interface RepositoryValidationRun {
   jsonReportPath?: string;
   htmlReportPath?: string;
   jsonReportData?: unknown;
+  validationProvider?: "github-actions" | "backend-fallback";
+  validationBranchName?: string;
+  workflowRunId?: number;
+  workflowRunUrl?: string;
+  workflowConclusion?: string;
   createdBy?: string;
   createdAt: string;
   completedAt?: string;

@@ -67,6 +67,7 @@ import {
   createImpactUpdatePullRequest,
   generateRepositoryTestUpdates,
   validateRepositoryTestUpdates,
+  validateRepositoryTestUpdatesWithGitHubActions,
 } from "./repositoryTestUpdateService.js";
 import { generateValidationRecommendation } from "./repositoryValidationRecommendationService.js";
 import type { RepositoryActivityChangedFile, RepositoryChangeType, RepositoryRiskLevel, WorkspaceRole } from "./projectTypes.js";
@@ -598,25 +599,89 @@ integrationRouter.post("/integrations/github/impact-analysis/:impactAnalysisId/r
     return;
   }
   const updates = await listRepositoryGeneratedTestUpdates(analysis.id);
-  const run = await validateRepositoryTestUpdates({
-    impactAnalysis: analysis,
-    updates,
-    automationConfig: toGitHubConfig(runtimeConfig),
+  const runningRun = await saveRepositoryValidationRun({
+    workspaceId: analysis.workspaceId,
+    projectId: analysis.projectId,
+    impactAnalysisId: analysis.id,
+    status: "Running",
+    totalTests: 0,
+    passed: 0,
+    failed: 0,
+    skipped: 0,
+    duration: 0,
+    browser: "chromium",
+    environment: "github-actions",
+    command: "Preparing GitHub Actions validation...",
+    logs: "Validation started. AI QA Copilot is creating a temporary validation branch, pushing approved Playwright updates, and dispatching GitHub Actions.",
+    stdout: "",
+    stderr: "",
+    failedTestNames: [],
+    failedTests: [],
+    screenshots: [],
+    videos: [],
+    traceFiles: [],
+    validationProvider: "github-actions",
     createdBy: request.userId,
   });
-  const savedRun = await saveRepositoryValidationRun(run);
-  void generateValidationRecommendation({
-    impactAnalysis: analysis,
-    validationRun: savedRun,
-    updates,
-    status: "Generated",
-    createdBy: request.userId,
-  })
-    .then((recommendation) => saveRepositoryValidationRecommendation(recommendation))
-    .catch((error) => {
-      console.error("AI validation recommendation failed", error);
-    });
-  response.status(201).json(savedRun);
+
+  void (async () => {
+    try {
+      let run;
+      try {
+        run = await validateRepositoryTestUpdatesWithGitHubActions({
+          impactAnalysis: analysis,
+          updates,
+          automationConfig: toGitHubConfig(runtimeConfig),
+          createdBy: request.userId,
+        });
+      } catch (actionsError) {
+        const fallbackReason = actionsError instanceof Error ? actionsError.message : "GitHub Actions validation could not start.";
+        const fallbackRun = await validateRepositoryTestUpdates({
+          impactAnalysis: analysis,
+          updates,
+          automationConfig: toGitHubConfig(runtimeConfig),
+          createdBy: request.userId,
+        });
+        run = {
+          ...fallbackRun,
+          validationProvider: "backend-fallback" as const,
+          logs: [
+            `GitHub Actions validation was unavailable: ${fallbackReason}`,
+            "AI QA Copilot used the backend validation runner as fallback.",
+            fallbackRun.logs,
+          ].filter(Boolean).join("\n\n"),
+          stderr: [fallbackReason, fallbackRun.stderr].filter(Boolean).join("\n\n"),
+        };
+      }
+      const savedRun = await updateRepositoryValidationRun(runningRun.id, run);
+      if (!savedRun) return;
+      void generateValidationRecommendation({
+        impactAnalysis: analysis,
+        validationRun: savedRun,
+        updates,
+        status: "Generated",
+        createdBy: request.userId,
+      })
+        .then((recommendation) => saveRepositoryValidationRecommendation(recommendation))
+        .catch((error) => {
+          console.error("AI validation recommendation failed", error);
+        });
+    } catch (error) {
+      const message = error instanceof Error ? error.message : "Validation failed unexpectedly.";
+      await updateRepositoryValidationRun(runningRun.id, {
+        status: "Error",
+        duration: 0,
+        logs: "Validation failed before Playwright execution completed.",
+        stdout: "",
+        stderr: message,
+        errorDetails: message,
+        failureExplanation: "Validation could not complete. Please review the repository setup and try again.",
+        completedAt: new Date().toISOString(),
+      });
+    }
+  })();
+
+  response.status(202).json(runningRun);
 }));
 
 integrationRouter.get("/integrations/github/impact-analysis/:impactAnalysisId/validation-result", asyncRoute(async (request, response) => {

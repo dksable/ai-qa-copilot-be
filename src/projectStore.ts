@@ -2559,7 +2559,7 @@ export async function getLatestRepositoryValidationRun(impactAnalysisId: string)
 
 export async function updateRepositoryValidationRun(
   runId: string,
-  input: Partial<Pick<RepositoryValidationRun, "aiFailureExplanation" | "failureExplanation" | "errorDetails">>,
+  input: Partial<Omit<RepositoryValidationRun, "id" | "createdAt">>,
 ) {
   const db = await readDb();
   const run = db.repositoryValidationRuns.find((item) => item.id === runId);

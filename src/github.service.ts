@@ -218,6 +218,11 @@ export async function readRepositoryFile(config: GitHubAutomationConfig, filePat
   }
 }
 
+export async function fileExists(config: GitHubAutomationConfig, filePath: string) {
+  const content = await readRepositoryFile(config, filePath);
+  return content.length > 0;
+}
+
 function folderFromPath(filePath: string) {
   const parts = filePath.split("/");
   parts.pop();
@@ -772,6 +777,84 @@ export async function createPullRequest(
       }),
     },
   );
+}
+
+export async function triggerWorkflowDispatch(
+  config: GitHubAutomationConfig,
+  input: {
+    workflowId: string;
+    ref: string;
+    inputs?: Record<string, string>;
+  },
+) {
+  await githubRequest(
+    config,
+    `/repos/${encodeURIComponent(config.owner)}/${encodeURIComponent(config.repo)}/actions/workflows/${encodeURIComponent(input.workflowId)}/dispatches`,
+    {
+      method: "POST",
+      body: JSON.stringify({
+        ref: input.ref,
+        inputs: input.inputs ?? {},
+      }),
+    },
+  );
+}
+
+export async function listWorkflowRuns(
+  config: GitHubAutomationConfig,
+  input: {
+    workflowId: string;
+    branch: string;
+  },
+) {
+  return githubRequest<{
+    workflow_runs: Array<{
+      id: number;
+      html_url: string;
+      status: "queued" | "in_progress" | "completed" | string;
+      conclusion: "success" | "failure" | "cancelled" | "skipped" | "timed_out" | "action_required" | null | string;
+      run_started_at?: string;
+      created_at: string;
+      updated_at: string;
+    }>;
+  }>(
+    config,
+    `/repos/${encodeURIComponent(config.owner)}/${encodeURIComponent(config.repo)}/actions/workflows/${encodeURIComponent(input.workflowId)}/runs?branch=${encodeURIComponent(input.branch)}&event=workflow_dispatch&per_page=10`,
+  );
+}
+
+export async function getWorkflowRun(config: GitHubAutomationConfig, runId: number) {
+  return githubRequest<{
+    id: number;
+    html_url: string;
+    status: "queued" | "in_progress" | "completed" | string;
+    conclusion: "success" | "failure" | "cancelled" | "skipped" | "timed_out" | "action_required" | null | string;
+    run_started_at?: string;
+    created_at: string;
+    updated_at: string;
+  }>(config, `/repos/${encodeURIComponent(config.owner)}/${encodeURIComponent(config.repo)}/actions/runs/${runId}`);
+}
+
+export async function listWorkflowRunJobs(config: GitHubAutomationConfig, runId: number) {
+  return githubRequest<{
+    jobs: Array<{
+      id: number;
+      name: string;
+      status: string;
+      conclusion: string | null;
+      started_at?: string | null;
+      completed_at?: string | null;
+      html_url: string;
+      steps?: Array<{
+        name: string;
+        status: string;
+        conclusion: string | null;
+        number: number;
+        started_at?: string | null;
+        completed_at?: string | null;
+      }>;
+    }>;
+  }>(config, `/repos/${encodeURIComponent(config.owner)}/${encodeURIComponent(config.repo)}/actions/runs/${runId}/jobs?per_page=100`);
 }
 
 export async function pushPlaywrightTestToGitHub(
