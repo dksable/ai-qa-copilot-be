@@ -807,19 +807,40 @@ integrationRouter.post("/integrations/github/analyze-repository", asyncRoute(asy
   const input = z.object({ workspaceId: z.string().min(1) }).parse(request.body);
   if (!(await requireWorkspaceRole(request, response, input.workspaceId, ["Owner", "Admin", "QA Lead"]))) return;
   const runtimeConfig = await getAutomationRepositoryRuntimeConfig(input.workspaceId);
-  const config = toGitHubConfig(runtimeConfig);
-  const analysis = await analyzeGitHubRepository(config);
-  const saved = await saveRepositoryAnalysis({
-    workspaceId: input.workspaceId,
-    integrationId: runtimeConfig!.id,
-    provider: "github",
-    repoOwner: runtimeConfig!.owner,
-    repoName: runtimeConfig!.repo,
-    branch: runtimeConfig!.defaultBranch,
-    ...analysis,
-    createdBy: request.userId ?? "Current User",
-  });
-  response.status(201).json(saved);
+  if (!runtimeConfig) {
+    response.status(400).json({ message: "Configure GitHub automation repository before analysis." });
+    return;
+  }
+  if (!runtimeConfig.token) {
+    response.status(400).json({ message: "GitHub token could not be read. Please reconnect and save the GitHub automation repository configuration." });
+    return;
+  }
+  try {
+    const config = toGitHubConfig(runtimeConfig);
+    const analysis = await analyzeGitHubRepository(config);
+    const saved = await saveRepositoryAnalysis({
+      workspaceId: input.workspaceId,
+      integrationId: runtimeConfig.id,
+      provider: "github",
+      repoOwner: runtimeConfig.owner,
+      repoName: runtimeConfig.repo,
+      branch: runtimeConfig.defaultBranch,
+      ...analysis,
+      createdBy: request.userId ?? "Current User",
+    });
+    response.status(201).json(saved);
+  } catch (error) {
+    const statusCode =
+      typeof error === "object" &&
+      error !== null &&
+      "statusCode" in error &&
+      typeof (error as { statusCode?: unknown }).statusCode === "number"
+        ? (error as { statusCode: number }).statusCode
+        : 502;
+    response.status(statusCode >= 500 ? 502 : statusCode).json({
+      message: error instanceof Error ? `GitHub repository analysis failed: ${error.message}` : "GitHub repository analysis failed.",
+    });
+  }
 }));
 
 integrationRouter.get("/integrations/github/analysis", asyncRoute(async (request, response) => {

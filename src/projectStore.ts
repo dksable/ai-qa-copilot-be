@@ -369,14 +369,18 @@ function encryptSecret(value: string) {
 
 export function decryptAIProviderSecret(value?: string) {
   if (!value) return "";
-  const [version, iv, tag, encrypted] = value.split(":");
-  if (version !== "v1" || !iv || !tag || !encrypted) return "";
-  const decipher = createDecipheriv("aes-256-gcm", encryptionKey(), Buffer.from(iv, "base64"));
-  decipher.setAuthTag(Buffer.from(tag, "base64"));
-  return Buffer.concat([
-    decipher.update(Buffer.from(encrypted, "base64")),
-    decipher.final(),
-  ]).toString("utf8");
+  try {
+    const [version, iv, tag, encrypted] = value.split(":");
+    if (version !== "v1" || !iv || !tag || !encrypted) return "";
+    const decipher = createDecipheriv("aes-256-gcm", encryptionKey(), Buffer.from(iv, "base64"));
+    decipher.setAuthTag(Buffer.from(tag, "base64"));
+    return Buffer.concat([
+      decipher.update(Buffer.from(encrypted, "base64")),
+      decipher.final(),
+    ]).toString("utf8");
+  } catch {
+    return "";
+  }
 }
 
 export const decryptAutomationRepositoryToken = decryptAIProviderSecret;
