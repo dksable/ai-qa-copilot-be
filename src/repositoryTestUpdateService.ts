@@ -211,15 +211,16 @@ async function createValidationWorkspace(
     }
   }
 
-  if (!await isPlaywrightProject(workspacePath)) {
+  const projectCheck = await inspectPlaywrightProject(workspacePath);
+  if (!projectCheck.valid) {
     return {
       exitCode: 1,
       stdout: "",
-      stderr: "Automation repository is not a valid Playwright project.",
+      stderr: "Connected automation repository is not a valid Playwright project.",
       logs: [
         ...setupLogs,
-        "Automation repository is not a valid Playwright project.",
-        "Expected package.json with @playwright/test or playwright config file.",
+        "Connected automation repository is not a valid Playwright project.",
+        projectCheck.reason,
       ].join("\n\n"),
       testPaths: [],
     };
@@ -292,17 +293,29 @@ function runPlaywrightValidation(workspacePath: string, setupLogs = "", testPath
   htmlReportPath?: string;
   jsonReportData?: unknown;
 }> {
-  const command = `npx playwright test ${testPaths.join(" ")} --reporter=json,html --workers=1`.replace(/\s+/g, " ").trim();
+  let validationCommand = `npx playwright test ${testPaths.join(" ")} --reporter=json,html --workers=1`.replace(/\s+/g, " ").trim();
   return new Promise((resolve) => {
     void (async () => {
+      const packageManager = await detectPackageManager(workspacePath);
+      const installCommand = packageManagerInstallCommand(packageManager);
+      const browserInstallCommand = packageManagerPlaywrightCommand(packageManager, ["install"]);
+      const testCommand = packageManagerPlaywrightCommand(packageManager, ["test", ...testPaths, "--reporter=json,html", "--workers=1"]);
+      validationCommand = testCommand.display;
       let dependencyInstall = { exitCode: 0, stdout: "", stderr: "", duration: 0 };
       if (!await pathExists(path.join(workspacePath, "node_modules", "@playwright", "test"))) {
-        dependencyInstall = await runCommand("npm", ["install", "--no-audit", "--no-fund", "--silent"], workspacePath, 180_000);
+        dependencyInstall = await runCommand(
+          installCommand.command,
+          installCommand.args,
+          workspacePath,
+          180_000,
+          [],
+          { PLAYWRIGHT_SKIP_BROWSER_DOWNLOAD: "1" },
+        );
       }
       if (dependencyInstall.exitCode !== 0) {
         const logs = [
           setupLogs,
-          buildCommandFailureLogs("npm install --no-audit --no-fund --silent", dependencyInstall),
+          buildCommandFailureLogs(installCommand.display, dependencyInstall),
         ].filter(Boolean).join("\n\n");
         resolve({
           exitCode: dependencyInstall.exitCode,
@@ -310,7 +323,7 @@ function runPlaywrightValidation(workspacePath: string, setupLogs = "", testPath
           passed: 0,
           failed: 1,
           skipped: 0,
-          command,
+          command: validationCommand,
           stdout: dependencyInstall.stdout,
           stderr: dependencyInstall.stderr,
           logs,
@@ -320,7 +333,7 @@ function runPlaywrightValidation(workspacePath: string, setupLogs = "", testPath
             testName: "Playwright dependency installation",
             errorMessage: dependencyInstall.stderr || dependencyInstall.stdout || "npm install failed.",
             duration: dependencyInstall.duration,
-            suggestedAction: "Ensure backend runtime can install @playwright/test or preinstall Playwright in the validation environment.",
+            suggestedAction: "Dependency installation failed. Please verify the automation repository package.json and Playwright setup.",
             stackTrace: dependencyInstall.stderr,
           }],
           stackTrace: dependencyInstall.stderr,
@@ -333,13 +346,13 @@ function runPlaywrightValidation(workspacePath: string, setupLogs = "", testPath
 
       let browserInstall = { exitCode: 0, stdout: "", stderr: "", duration: 0 };
       if (!process.env.PLAYWRIGHT_SKIP_BROWSER_INSTALL) {
-        browserInstall = await runCommand("npx", ["playwright", "install"], workspacePath, 180_000);
+        browserInstall = await runCommand(browserInstallCommand.command, browserInstallCommand.args, workspacePath, 180_000);
       }
       if (browserInstall.exitCode !== 0) {
         const logs = [
           setupLogs,
           dependencyInstall.stdout ? `npm install output:\n${dependencyInstall.stdout}` : "",
-          buildCommandFailureLogs("npx playwright install", browserInstall),
+          buildCommandFailureLogs(browserInstallCommand.display, browserInstall),
         ].filter(Boolean).join("\n\n");
         resolve({
           exitCode: browserInstall.exitCode,
@@ -347,7 +360,7 @@ function runPlaywrightValidation(workspacePath: string, setupLogs = "", testPath
           passed: 0,
           failed: 1,
           skipped: 0,
-          command,
+          command: validationCommand,
           stdout: browserInstall.stdout,
           stderr: browserInstall.stderr,
           logs,
@@ -368,12 +381,12 @@ function runPlaywrightValidation(workspacePath: string, setupLogs = "", testPath
         return;
       }
 
-      const test = await runCommand("npx", ["playwright", "test", ...testPaths, "--reporter=json,html", "--workers=1"], workspacePath, 180_000);
+      const test = await runCommand(testCommand.command, testCommand.args, workspacePath, 180_000);
       const parsed = await parsePlaywrightJson(test.stdout, workspacePath);
       const artifacts = await collectValidationArtifacts(workspacePath);
       const exitCode = test.exitCode;
       resolve({
-        command,
+        command: validationCommand,
         exitCode,
         totalTests: parsed.totalTests,
         passed: parsed.passed,
@@ -405,7 +418,7 @@ function runPlaywrightValidation(workspacePath: string, setupLogs = "", testPath
         passed: 0,
         failed: 1,
         skipped: 0,
-        command,
+        command: validationCommand,
         stdout: "",
         stderr: error instanceof Error ? error.message : "Playwright validation failed.",
         logs: error instanceof Error ? error.message : "Playwright validation failed.",
@@ -427,7 +440,14 @@ function runPlaywrightValidation(workspacePath: string, setupLogs = "", testPath
   });
 }
 
-function runCommand(command: string, args: string[], cwd: string, timeoutMs: number, redactions: string[] = []): Promise<{
+function runCommand(
+  command: string,
+  args: string[],
+  cwd: string,
+  timeoutMs: number,
+  redactions: string[] = [],
+  extraEnv: Record<string, string | undefined> = {},
+): Promise<{
   exitCode: number;
   stdout: string;
   stderr: string;
@@ -439,8 +459,8 @@ function runCommand(command: string, args: string[], cwd: string, timeoutMs: num
       cwd,
       env: {
         ...process.env,
+        ...extraEnv,
         CI: "1",
-        PLAYWRIGHT_SKIP_BROWSER_DOWNLOAD: process.env.PLAYWRIGHT_SKIP_BROWSER_DOWNLOAD ?? "1",
       },
       shell: process.platform === "win32",
     });
@@ -481,15 +501,67 @@ function buildGitHubCloneUrl(config: GitHubAutomationConfig) {
   return `https://x-access-token:${encodeURIComponent(config.token)}@github.com/${config.owner}/${config.repo}.git`;
 }
 
-async function isPlaywrightProject(workspacePath: string) {
-  const hasConfig = await pathExists(path.join(workspacePath, "playwright.config.ts")) || await pathExists(path.join(workspacePath, "playwright.config.js"));
-  if (hasConfig) return true;
-  try {
-    const pkg = JSON.parse(await readFile(path.join(workspacePath, "package.json"), "utf8"));
-    return Boolean(pkg.dependencies?.["@playwright/test"] || pkg.devDependencies?.["@playwright/test"] || pkg.dependencies?.playwright || pkg.devDependencies?.playwright);
-  } catch {
-    return false;
+async function inspectPlaywrightProject(workspacePath: string): Promise<{ valid: boolean; reason: string }> {
+  const packageJsonPath = path.join(workspacePath, "package.json");
+  if (!await pathExists(packageJsonPath)) {
+    return { valid: false, reason: "package.json was not found in the connected automation repository." };
   }
+  const hasConfig = await pathExists(path.join(workspacePath, "playwright.config.ts")) || await pathExists(path.join(workspacePath, "playwright.config.js"));
+  if (!hasConfig) {
+    return { valid: false, reason: "playwright.config.ts or playwright.config.js was not found." };
+  }
+  try {
+    const pkg = JSON.parse(await readFile(packageJsonPath, "utf8"));
+    const hasPlaywrightDependency = Boolean(
+      pkg.dependencies?.["@playwright/test"] ||
+      pkg.devDependencies?.["@playwright/test"] ||
+      pkg.dependencies?.playwright ||
+      pkg.devDependencies?.playwright,
+    );
+    return hasPlaywrightDependency
+      ? { valid: true, reason: "Valid Playwright project detected." }
+      : { valid: false, reason: "package.json does not include @playwright/test or playwright in dependencies/devDependencies." };
+  } catch {
+    return { valid: false, reason: "package.json could not be parsed." };
+  }
+}
+
+async function detectPackageManager(workspacePath: string): Promise<"npm" | "pnpm" | "yarn"> {
+  if (await pathExists(path.join(workspacePath, "pnpm-lock.yaml"))) return "pnpm";
+  if (await pathExists(path.join(workspacePath, "yarn.lock"))) return "yarn";
+  return "npm";
+}
+
+function packageManagerInstallCommand(packageManager: "npm" | "pnpm" | "yarn") {
+  if (packageManager === "pnpm") {
+    return { command: "pnpm", args: ["install", "--no-frozen-lockfile"], display: "pnpm install --no-frozen-lockfile" };
+  }
+  if (packageManager === "yarn") {
+    return { command: "yarn", args: ["install"], display: "yarn install" };
+  }
+  return { command: "npm", args: ["install", "--no-audit", "--no-fund", "--silent"], display: "npm install --no-audit --no-fund --silent" };
+}
+
+function packageManagerPlaywrightCommand(packageManager: "npm" | "pnpm" | "yarn", playwrightArgs: string[]) {
+  if (packageManager === "pnpm") {
+    return {
+      command: "pnpm",
+      args: ["exec", "playwright", ...playwrightArgs],
+      display: `pnpm exec playwright ${playwrightArgs.join(" ")}`.replace(/\s+/g, " ").trim(),
+    };
+  }
+  if (packageManager === "yarn") {
+    return {
+      command: "yarn",
+      args: ["playwright", ...playwrightArgs],
+      display: `yarn playwright ${playwrightArgs.join(" ")}`.replace(/\s+/g, " ").trim(),
+    };
+  }
+  return {
+    command: "npx",
+    args: ["playwright", ...playwrightArgs],
+    display: `npx playwright ${playwrightArgs.join(" ")}`.replace(/\s+/g, " ").trim(),
+  };
 }
 
 async function pathExists(filePath: string) {
@@ -543,7 +615,7 @@ function buildFailedSetupRun(input: {
     stackTrace: input.setup.stderr,
     validationWorkspacePath: input.workspacePath,
     errorDetails: invalidProject
-      ? "Automation repository is not a valid Playwright project."
+      ? "Connected automation repository is not a valid Playwright project."
       : "Unable to prepare automation repository validation workspace.",
     failureExplanation: invalidProject
       ? "Validation did not run because the connected automation repository is missing Playwright configuration or dependencies."
