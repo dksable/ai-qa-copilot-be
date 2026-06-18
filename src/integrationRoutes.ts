@@ -77,7 +77,6 @@ import {
   buildFailureSuggestion,
   createImpactUpdatePullRequest,
   generateRepositoryTestUpdates,
-  validateRepositoryTestUpdates,
   validateRepositoryTestUpdatesWithGitHubActions,
 } from "./repositoryTestUpdateService.js";
 import { generateValidationRecommendation } from "./repositoryValidationRecommendationService.js";
@@ -638,33 +637,12 @@ integrationRouter.post("/integrations/github/impact-analysis/:impactAnalysisId/r
 
   void (async () => {
     try {
-      let run;
-      try {
-        run = await validateRepositoryTestUpdatesWithGitHubActions({
-          impactAnalysis: analysis,
-          updates,
-          automationConfig: toGitHubConfig(runtimeConfig),
-          createdBy: request.userId,
-        });
-      } catch (actionsError) {
-        const fallbackReason = actionsError instanceof Error ? actionsError.message : "GitHub Actions validation could not start.";
-        const fallbackRun = await validateRepositoryTestUpdates({
-          impactAnalysis: analysis,
-          updates,
-          automationConfig: toGitHubConfig(runtimeConfig),
-          createdBy: request.userId,
-        });
-        run = {
-          ...fallbackRun,
-          validationProvider: "backend-fallback" as const,
-          logs: [
-            `GitHub Actions validation was unavailable: ${fallbackReason}`,
-            "AI QA Copilot used the backend validation runner as fallback.",
-            fallbackRun.logs,
-          ].filter(Boolean).join("\n\n"),
-          stderr: [fallbackReason, fallbackRun.stderr].filter(Boolean).join("\n\n"),
-        };
-      }
+      const run = await validateRepositoryTestUpdatesWithGitHubActions({
+        impactAnalysis: analysis,
+        updates,
+        automationConfig: toGitHubConfig(runtimeConfig),
+        createdBy: request.userId,
+      });
       const savedRun = await updateRepositoryValidationRun(runningRun.id, run);
       if (!savedRun) return;
       void generateValidationRecommendation({
@@ -683,11 +661,16 @@ integrationRouter.post("/integrations/github/impact-analysis/:impactAnalysisId/r
       await updateRepositoryValidationRun(runningRun.id, {
         status: "Error",
         duration: 0,
-        logs: "Validation failed before Playwright execution completed.",
+        logs: [
+          "GitHub Actions validation could not complete.",
+          "Backend Playwright execution is disabled for Render deployments, so no local npx playwright test command was run.",
+          message,
+        ].join("\n\n"),
         stdout: "",
         stderr: message,
         errorDetails: message,
-        failureExplanation: "Validation could not complete. Please review the repository setup and try again.",
+        failureExplanation: "Validation could not complete through GitHub Actions. Verify the automation repository workflow, token permissions, and branch access, then try again.",
+        validationProvider: "github-actions",
         completedAt: new Date().toISOString(),
       });
     }
@@ -1030,12 +1013,7 @@ integrationRouter.post("/validation/:validationRunId/retry", asyncRoute(async (r
     updates,
     automationConfig: toGitHubConfig(runtimeConfig),
     createdBy: request.userId,
-  }).catch(() => validateRepositoryTestUpdates({
-    impactAnalysis: analysis,
-    updates,
-    automationConfig: toGitHubConfig(runtimeConfig),
-    createdBy: request.userId,
-  }));
+  });
   const savedRun = await saveRepositoryValidationRun(run);
   const retry = await saveValidationRetryAttempt({
     workspaceId: previousRun.workspaceId,
