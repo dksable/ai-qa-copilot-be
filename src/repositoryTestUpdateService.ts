@@ -5,7 +5,7 @@ import type {
   RepositoryValidationRecommendation,
   RepositoryValidationRun,
 } from "./projectTypes.js";
-import { spawn } from "node:child_process";
+import { spawn, spawnSync } from "node:child_process";
 import { access, cp, mkdir, readFile, readdir, rm, stat, writeFile } from "node:fs/promises";
 import path from "node:path";
 import type { GitHubAutomationConfig } from "./github.service.js";
@@ -22,6 +22,15 @@ import {
 } from "./github.service.js";
 
 const PLAYWRIGHT_VALIDATION_WORKFLOW = ".github/workflows/playwright-validation.yml";
+type ValidationDebugStep = NonNullable<RepositoryValidationRun["validationDebugLogs"]>[number];
+type ValidationCommandResult = {
+  exitCode: number;
+  stdout: string;
+  stderr: string;
+  duration: number;
+  debugLog: string;
+  debugStep: ValidationDebugStep;
+};
 
 function slugify(value: string) {
   return value
@@ -128,6 +137,15 @@ export async function validateRepositoryTestUpdates(input: {
       logs: "No approved or edited Playwright updates were available for validation.",
       stdout: "",
       stderr: "",
+      validationDebugLogs: [await buildManualDebugStep({
+        stepName: "Approved update check",
+        cwd: process.cwd(),
+        command: "Validate approved generated test updates",
+        status: "Failed",
+        stdout: "",
+        stderr: "No approved or edited Playwright updates were available for validation.",
+        exitCode: 1,
+      })],
       failedTestNames: [],
       failedTests: [],
       errorDetails: "Approve or edit at least one generated test update before running validation.",
@@ -152,7 +170,7 @@ export async function validateRepositoryTestUpdates(input: {
       createdBy: input.createdBy,
     });
   }
-  const result = await runPlaywrightValidation(workspacePath, setup.logs, setup.testPaths);
+  const result = await runPlaywrightValidation(workspacePath, setup.logs, setup.testPaths, setup.validationDebugLogs);
   const duration = Date.now() - started;
   const errorDetails = result.failed > 0 || result.exitCode !== 0
     ? buildValidationErrorDetails(result)
@@ -173,6 +191,7 @@ export async function validateRepositoryTestUpdates(input: {
     logs: result.logs,
     stdout: result.stdout,
     stderr: result.stderr,
+    validationDebugLogs: result.validationDebugLogs,
     failedTestNames: result.failedTestNames,
     failedTests: result.failedTests,
     stackTrace: result.stackTrace,
@@ -218,6 +237,15 @@ export async function validateRepositoryTestUpdatesWithGitHubActions(input: {
       logs: "No approved or edited Playwright updates were available for GitHub Actions validation.",
       stdout: "",
       stderr: "",
+      validationDebugLogs: [await buildManualDebugStep({
+        stepName: "Approved update check",
+        cwd: process.cwd(),
+        command: "Validate approved generated test updates",
+        status: "Failed",
+        stdout: "",
+        stderr: "No approved or edited Playwright updates were available for GitHub Actions validation.",
+        exitCode: 1,
+      })],
       failedTestNames: [],
       failedTests: [],
       errorDetails: "Approve or edit at least one generated test update before running validation.",
@@ -231,6 +259,17 @@ export async function validateRepositoryTestUpdatesWithGitHubActions(input: {
   }
 
   const workflowExists = await fileExists(input.automationConfig, PLAYWRIGHT_VALIDATION_WORKFLOW);
+  const debugLogs: ValidationDebugStep[] = [
+    await buildManualDebugStep({
+      stepName: "Verify GitHub Actions workflow",
+      cwd: process.cwd(),
+      command: `GitHub API: check ${PLAYWRIGHT_VALIDATION_WORKFLOW}`,
+      status: workflowExists ? "Passed" : "Failed",
+      stdout: workflowExists ? "Workflow file found." : "",
+      stderr: workflowExists ? "" : `GitHub Actions workflow not found at ${PLAYWRIGHT_VALIDATION_WORKFLOW}.`,
+      exitCode: workflowExists ? 0 : 1,
+    }),
+  ];
   if (!workflowExists) {
     throw new Error(
       `GitHub Actions workflow not found at ${PLAYWRIGHT_VALIDATION_WORKFLOW}. Add this workflow to the automation repository default branch, then run validation again.`,
@@ -239,6 +278,15 @@ export async function validateRepositoryTestUpdatesWithGitHubActions(input: {
 
   const branchName = `aiqa/validation-${uniqueSuffix()}`;
   await createBranch(input.automationConfig, branchName);
+  debugLogs.push(await buildManualDebugStep({
+    stepName: "Create validation branch",
+    cwd: process.cwd(),
+    command: `GitHub API: create branch ${branchName}`,
+    status: "Passed",
+    stdout: `Created validation branch ${branchName}.`,
+    stderr: "",
+    exitCode: 0,
+  }));
 
   for (const update of approved) {
     await createOrReplaceFile(input.automationConfig, {
@@ -248,6 +296,15 @@ export async function validateRepositoryTestUpdatesWithGitHubActions(input: {
       message: `AI QA Copilot: validate ${update.testFilePath}`,
     });
   }
+  debugLogs.push(await buildManualDebugStep({
+    stepName: "Apply approved generated test updates",
+    cwd: process.cwd(),
+    command: `GitHub API: create or update ${approved.length} test file(s)`,
+    status: "Passed",
+    stdout: approved.map((update) => update.testFilePath).join("\n"),
+    stderr: "",
+    exitCode: 0,
+  }));
 
   const testFiles = approved.map((update) => update.testFilePath).join(",");
   await triggerWorkflowDispatch(input.automationConfig, {
@@ -258,11 +315,29 @@ export async function validateRepositoryTestUpdatesWithGitHubActions(input: {
       validation_branch: branchName,
     },
   });
+  debugLogs.push(await buildManualDebugStep({
+    stepName: "Trigger GitHub Actions validation",
+    cwd: process.cwd(),
+    command: `workflow_dispatch ${PLAYWRIGHT_VALIDATION_WORKFLOW}`,
+    status: "Passed",
+    stdout: `Triggered workflow for branch ${branchName}. Test files: ${testFiles || "all"}`,
+    stderr: "",
+    exitCode: 0,
+  }));
 
   const workflowRun = await waitForWorkflowRun(input.automationConfig, branchName);
   const completedRun = await waitForWorkflowCompletion(input.automationConfig, workflowRun.id);
   const jobs = await listWorkflowRunJobs(input.automationConfig, completedRun.id).catch(() => ({ jobs: [] }));
   const logs = summarizeWorkflowJobs(jobs.jobs);
+  debugLogs.push(await buildManualDebugStep({
+    stepName: "Poll GitHub Actions result",
+    cwd: process.cwd(),
+    command: `GitHub API: poll workflow run ${completedRun.id}`,
+    status: completedRun.conclusion === "success" ? "Passed" : completedRun.conclusion === "skipped" ? "Skipped" : "Failed",
+    stdout: logs,
+    stderr: completedRun.conclusion === "success" ? "" : `Workflow concluded with ${completedRun.conclusion ?? "unknown"}.`,
+    exitCode: completedRun.conclusion === "success" ? 0 : 1,
+  }));
   const failedTests = jobs.jobs
     .filter((job) => job.conclusion && job.conclusion !== "success" && job.conclusion !== "skipped")
     .map((job) => ({
@@ -294,6 +369,7 @@ export async function validateRepositoryTestUpdatesWithGitHubActions(input: {
     logs,
     stdout: logs,
     stderr: conclusion === "success" ? "" : `Workflow concluded with ${conclusion}.`,
+    validationDebugLogs: debugLogs,
     failedTestNames: failedTests.map((test) => test.testName),
     failedTests,
     errorDetails: conclusion === "success" ? undefined : `GitHub Actions validation workflow concluded with ${conclusion}.`,
@@ -318,28 +394,48 @@ async function createValidationWorkspace(
   workspacePath: string,
   updates: RepositoryGeneratedTestUpdate[],
   automationConfig: GitHubAutomationConfig,
-): Promise<{ exitCode: number; stdout: string; stderr: string; logs: string; testPaths: string[] }> {
+): Promise<{ exitCode: number; stdout: string; stderr: string; logs: string; testPaths: string[]; validationDebugLogs: ValidationDebugStep[] }> {
   await rm(workspacePath, { recursive: true, force: true });
   await mkdir(path.dirname(workspacePath), { recursive: true });
 
   const localRepoPath = process.env.AIQA_AUTOMATION_REPO_LOCAL_PATH;
   const setupLogs: string[] = [];
+  const validationDebugLogs: ValidationDebugStep[] = [];
   if (localRepoPath && await pathExists(localRepoPath)) {
     await cp(localRepoPath, workspacePath, {
       recursive: true,
       filter: (source) => !source.includes(`${path.sep}.git${path.sep}`),
     });
     setupLogs.push(`Copied automation repository from local path: ${localRepoPath}`);
+    validationDebugLogs.push(await buildManualDebugStep({
+      stepName: "Copy automation repository",
+      cwd: workspacePath,
+      command: `Copy local automation repository from ${localRepoPath}`,
+      status: "Passed",
+      stdout: `Copied automation repository from local path: ${localRepoPath}`,
+      stderr: "",
+      exitCode: 0,
+    }));
   } else {
     const cloneUrl = buildGitHubCloneUrl(automationConfig);
-    const clone = await runCommand("git", ["clone", "--depth", "1", "--branch", automationConfig.defaultBranch, cloneUrl, workspacePath], process.cwd(), 180_000, [automationConfig.token]);
+    const clone = await runCommand("git", ["clone", "--depth", "1", "--branch", automationConfig.defaultBranch, cloneUrl, workspacePath], process.cwd(), 180_000, [automationConfig.token], {}, "Git clone automation repository");
+    validationDebugLogs.push(clone.debugStep);
     setupLogs.push(buildCommandFailureLogs(`git clone --depth 1 --branch ${automationConfig.defaultBranch} https://github.com/${automationConfig.owner}/${automationConfig.repo}.git`, clone));
     if (clone.exitCode !== 0) {
-      return { exitCode: clone.exitCode, stdout: clone.stdout, stderr: clone.stderr, logs: setupLogs.join("\n\n"), testPaths: [] };
+      return { exitCode: clone.exitCode, stdout: clone.stdout, stderr: clone.stderr, logs: setupLogs.join("\n\n"), testPaths: [], validationDebugLogs };
     }
   }
 
   const projectCheck = await inspectPlaywrightProject(workspacePath);
+  validationDebugLogs.push(await buildManualDebugStep({
+    stepName: "Verify repository root",
+    cwd: workspacePath,
+    command: "Verify package.json and Playwright config",
+    status: projectCheck.valid ? "Passed" : "Failed",
+    stdout: projectCheck.valid ? projectCheck.reason : "",
+    stderr: projectCheck.valid ? "" : projectCheck.reason,
+    exitCode: projectCheck.valid ? 0 : 1,
+  }));
   if (!projectCheck.valid) {
     return {
       exitCode: 1,
@@ -351,6 +447,7 @@ async function createValidationWorkspace(
         projectCheck.reason,
       ].join("\n\n"),
       testPaths: [],
+      validationDebugLogs,
     };
   }
 
@@ -362,6 +459,15 @@ async function createValidationWorkspace(
     await writeFile(destination, sanitizePlaywrightCode(update.newCode), "utf8");
     testPaths.push(safePath);
   }
+  validationDebugLogs.push(await buildManualDebugStep({
+    stepName: "Apply approved generated test updates",
+    cwd: workspacePath,
+    command: `Write ${updates.length} approved test update(s)`,
+    status: "Passed",
+    stdout: testPaths.join("\n"),
+    stderr: "",
+    exitCode: 0,
+  }));
 
   return {
     exitCode: 0,
@@ -372,6 +478,7 @@ async function createValidationWorkspace(
       `Applied ${updates.length} approved Playwright test update(s) into isolated automation repository copy.`,
     ].join("\n\n"),
     testPaths,
+    validationDebugLogs,
   };
 }
 
@@ -400,7 +507,7 @@ function sanitizePlaywrightCode(code: string) {
   return trimmed.endsWith("\n") ? trimmed : `${trimmed}\n`;
 }
 
-function runPlaywrightValidation(workspacePath: string, setupLogs = "", testPaths: string[] = []): Promise<{
+function runPlaywrightValidation(workspacePath: string, setupLogs = "", testPaths: string[] = [], setupDebugLogs: ValidationDebugStep[] = []): Promise<{
   exitCode: number;
   totalTests: number;
   passed: number;
@@ -420,6 +527,7 @@ function runPlaywrightValidation(workspacePath: string, setupLogs = "", testPath
   jsonReportPath?: string;
   htmlReportPath?: string;
   jsonReportData?: unknown;
+  validationDebugLogs: ValidationDebugStep[];
 }> {
   let validationCommand = `npx playwright test ${testPaths.join(" ")} --reporter=json,html --workers=1`.replace(/\s+/g, " ").trim();
   return new Promise((resolve) => {
@@ -429,7 +537,23 @@ function runPlaywrightValidation(workspacePath: string, setupLogs = "", testPath
       const browserInstallCommand = packageManagerPlaywrightCommand(packageManager, ["install"]);
       const testCommand = packageManagerPlaywrightCommand(packageManager, ["test", ...testPaths, "--reporter=json,html", "--workers=1"]);
       validationCommand = testCommand.display;
-      let dependencyInstall = { exitCode: 0, stdout: "", stderr: "", duration: 0 };
+      let dependencyInstall: ValidationCommandResult = {
+        exitCode: 0,
+        stdout: "",
+        stderr: "",
+        duration: 0,
+        debugLog: "",
+        debugStep: await buildManualDebugStep({
+          stepName: "Install dependencies",
+          cwd: workspacePath,
+          command: installCommand.display,
+          status: "Skipped",
+          stdout: "No dependency installation was required.",
+          stderr: "",
+          exitCode: 0,
+        }),
+      };
+      const validationDebugLogs = [...setupDebugLogs];
       if (!await pathExists(path.join(workspacePath, "node_modules", "@playwright", "test"))) {
         dependencyInstall = await runCommand(
           installCommand.command,
@@ -438,7 +562,19 @@ function runPlaywrightValidation(workspacePath: string, setupLogs = "", testPath
           180_000,
           [],
           { PLAYWRIGHT_SKIP_BROWSER_DOWNLOAD: "1" },
+          "Install dependencies",
         );
+        validationDebugLogs.push(dependencyInstall.debugStep);
+      } else {
+        validationDebugLogs.push(await buildManualDebugStep({
+          stepName: "Install dependencies",
+          cwd: workspacePath,
+          command: installCommand.display,
+          status: "Skipped",
+          stdout: "Skipped because node_modules/@playwright/test already exists.",
+          stderr: "",
+          exitCode: 0,
+        }));
       }
       if (dependencyInstall.exitCode !== 0) {
         const logs = [
@@ -468,17 +604,45 @@ function runPlaywrightValidation(workspacePath: string, setupLogs = "", testPath
           screenshots: [],
           videos: [],
           traceFiles: [],
+          validationDebugLogs,
         });
         return;
       }
 
-      let browserInstall = { exitCode: 0, stdout: "", stderr: "", duration: 0 };
+      let browserInstall: ValidationCommandResult = {
+        exitCode: 0,
+        stdout: "",
+        stderr: "",
+        duration: 0,
+        debugLog: "",
+        debugStep: await buildManualDebugStep({
+          stepName: "Install Playwright browsers",
+          cwd: workspacePath,
+          command: browserInstallCommand.display,
+          status: "Skipped",
+          stdout: "No browser installation was required.",
+          stderr: "",
+          exitCode: 0,
+        }),
+      };
       if (!process.env.PLAYWRIGHT_SKIP_BROWSER_INSTALL) {
-        browserInstall = await runCommand(browserInstallCommand.command, browserInstallCommand.args, workspacePath, 180_000);
+        browserInstall = await runCommand(browserInstallCommand.command, browserInstallCommand.args, workspacePath, 180_000, [], {}, "Install Playwright browsers");
+        validationDebugLogs.push(browserInstall.debugStep);
+      } else {
+        validationDebugLogs.push(await buildManualDebugStep({
+          stepName: "Install Playwright browsers",
+          cwd: workspacePath,
+          command: browserInstallCommand.display,
+          status: "Skipped",
+          stdout: "Skipped because PLAYWRIGHT_SKIP_BROWSER_INSTALL is enabled.",
+          stderr: "",
+          exitCode: 0,
+        }));
       }
       if (browserInstall.exitCode !== 0) {
         const logs = [
           setupLogs,
+          dependencyInstall.debugLog,
           dependencyInstall.stdout ? `npm install output:\n${dependencyInstall.stdout}` : "",
           buildCommandFailureLogs(browserInstallCommand.display, browserInstall),
         ].filter(Boolean).join("\n\n");
@@ -505,12 +669,23 @@ function runPlaywrightValidation(workspacePath: string, setupLogs = "", testPath
           screenshots: [],
           videos: [],
           traceFiles: [],
+          validationDebugLogs,
         });
         return;
       }
 
-      const test = await runCommand(testCommand.command, testCommand.args, workspacePath, 180_000);
+      const test = await runCommand(testCommand.command, testCommand.args, workspacePath, 180_000, [], {}, "Run Playwright test command");
+      validationDebugLogs.push(test.debugStep);
       const parsed = await parsePlaywrightJson(test.stdout, workspacePath);
+      validationDebugLogs.push(await buildManualDebugStep({
+        stepName: "Parse validation result",
+        cwd: workspacePath,
+        command: "Parse Playwright JSON report",
+        status: parsed.totalTests || test.exitCode === 0 ? "Passed" : "Failed",
+        stdout: `Total: ${parsed.totalTests}\nPassed: ${parsed.passed}\nFailed: ${parsed.failed}\nSkipped: ${parsed.skipped}`,
+        stderr: parsed.totalTests || test.exitCode === 0 ? "" : "No Playwright JSON result could be parsed.",
+        exitCode: parsed.totalTests || test.exitCode === 0 ? 0 : 1,
+      }));
       const artifacts = await collectValidationArtifacts(workspacePath);
       const exitCode = test.exitCode;
       resolve({
@@ -524,6 +699,9 @@ function runPlaywrightValidation(workspacePath: string, setupLogs = "", testPath
         stderr: test.stderr,
         logs: [
           setupLogs,
+          dependencyInstall.debugLog,
+          browserInstall.debugLog,
+          test.debugLog,
           dependencyInstall.stdout ? `npm install output:\n${dependencyInstall.stdout}` : "",
           browserInstall.stdout ? `playwright install output:\n${browserInstall.stdout}` : "",
           buildValidationLogs({ stdout: test.stdout, stderr: test.stderr, parsed, exitCode }),
@@ -538,6 +716,7 @@ function runPlaywrightValidation(workspacePath: string, setupLogs = "", testPath
         jsonReportPath: parsed.jsonReportPath,
         htmlReportPath: artifacts.htmlReportPath,
         jsonReportData: parsed.jsonReportData,
+        validationDebugLogs,
       });
     })().catch((error) => {
       resolve({
@@ -563,6 +742,7 @@ function runPlaywrightValidation(workspacePath: string, setupLogs = "", testPath
         screenshots: [],
         videos: [],
         traceFiles: [],
+        validationDebugLogs: setupDebugLogs,
       });
     });
   });
@@ -575,14 +755,25 @@ function runCommand(
   timeoutMs: number,
   redactions: string[] = [],
   extraEnv: Record<string, string | undefined> = {},
+  stepName = "Execute command",
 ): Promise<{
   exitCode: number;
   stdout: string;
   stderr: string;
   duration: number;
+  debugLog: string;
+  debugStep: ValidationDebugStep;
 }> {
   const started = Date.now();
   return new Promise((resolve) => {
+    void (async () => {
+      const commandLine = `${command} ${args.join(" ")}`.trim();
+      const beforeDebug = await buildValidationCommandDebug({
+        cwd,
+        commandLine,
+        redactions,
+      });
+      console.info(beforeDebug.log);
     const child = spawn(command, args, {
       cwd,
       env: {
@@ -594,6 +785,42 @@ function runCommand(
     });
     let stdout = "";
     let stderr = "";
+    const complete = (exitCode: number, extraStderr = "") => {
+      const safeStdout = redactSecrets(stdout, redactions);
+      const safeStderr = redactSecrets(`${stderr}${extraStderr ? `\n${extraStderr}` : ""}`.trim(), redactions);
+      const afterDebug = buildValidationCommandResultDebug({
+        exitCode,
+        stdout: safeStdout,
+        stderr: safeStderr,
+      });
+      const debugLog = `${beforeDebug.log}\n${afterDebug}`;
+      const debugStep: ValidationDebugStep = {
+        stepName,
+        status: exitCode === 0 ? "Passed" : "Failed",
+        command: beforeDebug.snapshot.commandLine,
+        workingDirectory: beforeDebug.snapshot.cwd,
+        repositoryPath: beforeDebug.snapshot.cwd,
+        packageJsonExists: beforeDebug.snapshot.packageJsonExists,
+        packageLockExists: beforeDebug.snapshot.packageLockExists,
+        playwrightConfigTsExists: beforeDebug.snapshot.playwrightConfigTsExists,
+        nodeModulesExists: beforeDebug.snapshot.nodeModulesExists,
+        playwrightTestInstalled: beforeDebug.snapshot.playwrightTestInstalled,
+        npmVersion: beforeDebug.snapshot.npmVersion,
+        nodeVersion: beforeDebug.snapshot.nodeVersion,
+        exitCode,
+        stdout: safeStdout,
+        stderr: safeStderr,
+      };
+      console.info(debugLog);
+      return {
+        exitCode,
+        stdout: safeStdout,
+        stderr: safeStderr,
+        duration: Date.now() - started,
+        debugLog,
+        debugStep,
+      };
+    };
     const timeout = setTimeout(() => {
       stderr += `\nCommand timed out after ${timeoutMs / 1000}s.`;
       child.kill("SIGTERM");
@@ -606,23 +833,140 @@ function runCommand(
     });
     child.on("error", (error) => {
       clearTimeout(timeout);
-      resolve({
-        exitCode: 1,
-        stdout: redactSecrets(stdout, redactions),
-        stderr: redactSecrets(`${stderr}\n${error.message}`.trim(), redactions),
-        duration: Date.now() - started,
-      });
+      resolve(complete(1, error.message));
     });
     child.on("close", (code) => {
       clearTimeout(timeout);
+      resolve(complete(typeof code === "number" ? code : 1));
+    });
+    })().catch((error) => {
+      const message = error instanceof Error ? error.message : "Unable to build validation debug output.";
       resolve({
-        exitCode: typeof code === "number" ? code : 1,
-        stdout: redactSecrets(stdout, redactions),
-        stderr: redactSecrets(stderr, redactions),
+        exitCode: 1,
+        stdout: "",
+        stderr: message,
         duration: Date.now() - started,
+        debugLog: `Validation Debug Mode\nstderr:\n${message}`,
+        debugStep: {
+          stepName,
+          status: "Failed",
+          command: `${command} ${args.join(" ")}`.trim(),
+          workingDirectory: cwd,
+          repositoryPath: cwd,
+          packageJsonExists: false,
+          packageLockExists: false,
+          playwrightConfigTsExists: false,
+          nodeModulesExists: false,
+          playwrightTestInstalled: false,
+          npmVersion: getNpmVersion(),
+          nodeVersion: process.version,
+          exitCode: 1,
+          stdout: "",
+          stderr: message,
+        },
       });
     });
   });
+}
+
+async function buildValidationCommandDebug(input: {
+  cwd: string;
+  commandLine: string;
+  redactions: string[];
+}) {
+  const packageJsonExists = await pathExists(path.join(input.cwd, "package.json"));
+  const packageLockExists = await pathExists(path.join(input.cwd, "package-lock.json"));
+  const playwrightConfigTsExists = await pathExists(path.join(input.cwd, "playwright.config.ts"));
+  const nodeModulesExists = await pathExists(path.join(input.cwd, "node_modules"));
+  const playwrightTestInstalled = await pathExists(path.join(input.cwd, "node_modules", "@playwright", "test"));
+  const npmVersion = getNpmVersion();
+  const snapshot = {
+    cwd: input.cwd,
+    commandLine: redactSecrets(input.commandLine, input.redactions),
+    packageJsonExists,
+    packageLockExists,
+    playwrightConfigTsExists,
+    nodeModulesExists,
+    playwrightTestInstalled,
+    npmVersion,
+    nodeVersion: process.version,
+  };
+  const log = redactSecrets([
+    "Validation Debug Mode",
+    "Before Command",
+    `Current Working Directory: ${snapshot.cwd}`,
+    `Repository Path: ${snapshot.cwd}`,
+    `package.json exists?: ${packageJsonExists ? "Yes" : "No"}`,
+    `package-lock.json exists?: ${packageLockExists ? "Yes" : "No"}`,
+    `playwright.config.ts exists?: ${playwrightConfigTsExists ? "Yes" : "No"}`,
+    `node_modules exists?: ${nodeModulesExists ? "Yes" : "No"}`,
+    `@playwright/test installed?: ${playwrightTestInstalled ? "Yes" : "No"}`,
+    `npm version: ${npmVersion}`,
+    `node version: ${snapshot.nodeVersion}`,
+    `Command being executed: ${snapshot.commandLine}`,
+  ].join("\n"), input.redactions);
+  return { log, snapshot };
+}
+
+async function buildManualDebugStep(input: {
+  stepName: string;
+  cwd: string;
+  command: string;
+  status: "Passed" | "Failed" | "Skipped";
+  stdout: string;
+  stderr: string;
+  exitCode: number;
+}): Promise<ValidationDebugStep> {
+  const packageJsonExists = await pathExists(path.join(input.cwd, "package.json"));
+  const packageLockExists = await pathExists(path.join(input.cwd, "package-lock.json"));
+  const playwrightConfigTsExists = await pathExists(path.join(input.cwd, "playwright.config.ts"));
+  const nodeModulesExists = await pathExists(path.join(input.cwd, "node_modules"));
+  const playwrightTestInstalled = await pathExists(path.join(input.cwd, "node_modules", "@playwright", "test"));
+  return {
+    stepName: input.stepName,
+    status: input.status,
+    command: input.command,
+    workingDirectory: input.cwd,
+    repositoryPath: input.cwd,
+    packageJsonExists,
+    packageLockExists,
+    playwrightConfigTsExists,
+    nodeModulesExists,
+    playwrightTestInstalled,
+    npmVersion: getNpmVersion(),
+    nodeVersion: process.version,
+    exitCode: input.exitCode,
+    stdout: input.stdout,
+    stderr: input.stderr,
+  };
+}
+
+function buildValidationCommandResultDebug(input: {
+  exitCode: number;
+  stdout: string;
+  stderr: string;
+}) {
+  return [
+    "After Command",
+    `Exit code: ${input.exitCode}`,
+    "stdout:",
+    input.stdout || "(empty)",
+    "stderr:",
+    input.stderr || "(empty)",
+  ].join("\n");
+}
+
+function getNpmVersion() {
+  try {
+    const result = spawnSync("npm", ["--version"], {
+      encoding: "utf8",
+      timeout: 5000,
+      shell: process.platform === "win32",
+    });
+    return (result.stdout || result.stderr || "unknown").trim() || "unknown";
+  } catch {
+    return "unknown";
+  }
 }
 
 function buildGitHubCloneUrl(config: GitHubAutomationConfig) {
@@ -708,7 +1052,7 @@ function redactSecrets(value: string, secrets: string[]) {
 function buildFailedSetupRun(input: {
   impactAnalysis: RepositoryImpactAnalysis;
   workspacePath: string;
-  setup: { exitCode: number; stdout: string; stderr: string; logs: string };
+  setup: { exitCode: number; stdout: string; stderr: string; logs: string; validationDebugLogs: ValidationDebugStep[] };
   started: number;
   createdBy?: string;
 }): Omit<RepositoryValidationRun, "id" | "createdAt"> {
@@ -729,6 +1073,7 @@ function buildFailedSetupRun(input: {
     logs: input.setup.logs,
     stdout: input.setup.stdout,
     stderr: input.setup.stderr,
+    validationDebugLogs: input.setup.validationDebugLogs,
     failedTestNames: [invalidProject ? "Invalid Playwright project" : "Automation repository setup"],
     failedTests: [{
       testFile: invalidProject ? "playwright.config.ts" : "automation repository",
@@ -859,8 +1204,9 @@ function buildValidationLogs(input: {
   return summary.join("\n");
 }
 
-function buildCommandFailureLogs(command: string, result: { exitCode: number; stdout: string; stderr: string }) {
+function buildCommandFailureLogs(command: string, result: { exitCode: number; stdout: string; stderr: string; debugLog?: string }) {
   return [
+    result.debugLog,
     `Command: ${command}`,
     `Exit code: ${result.exitCode}`,
     result.stderr ? `stderr:\n${result.stderr}` : "",

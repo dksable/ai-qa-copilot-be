@@ -607,6 +607,23 @@ export interface RepositoryValidationRun {
   logs: string;
   stdout?: string;
   stderr?: string;
+  validationDebugLogs?: Array<{
+    stepName: string;
+    status: "Passed" | "Failed" | "Skipped";
+    command: string;
+    workingDirectory: string;
+    repositoryPath: string;
+    packageJsonExists: boolean;
+    packageLockExists: boolean;
+    playwrightConfigTsExists: boolean;
+    nodeModulesExists: boolean;
+    playwrightTestInstalled: boolean;
+    npmVersion: string;
+    nodeVersion: string;
+    exitCode: number;
+    stdout: string;
+    stderr: string;
+  }>;
   failedTestNames?: string[];
   failedTests?: Array<{
     testFile: string;
