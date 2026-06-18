@@ -6,6 +6,9 @@ import {
   analyzeGitHubRepository,
   buildRepositorySyncPrPreview,
   compareGitHubCommits,
+  createBranch,
+  createOrReplaceFile,
+  createPullRequest,
   createGitHubWebhook,
   createRepositorySyncPullRequest,
   createRepositorySyncUpdatePullRequest,
@@ -179,6 +182,105 @@ function webhookUrl() {
 
 function generateWebhookSecret() {
   return `whsec_${randomBytes(24).toString("hex")}`;
+}
+
+function onboardingBranchName() {
+  const timestamp = new Date().toISOString().replace(/\.\d{3}Z$/, "").replace(/[^0-9]/g, "");
+  return `aiqa/automation-repository-onboarding-${timestamp}`;
+}
+
+function onboardingFileContent(filePath: string, testFolderPath = "tests") {
+  if (filePath === "package.json") {
+    return JSON.stringify({
+      scripts: { test: "playwright test" },
+      devDependencies: {
+        "@playwright/test": "^1.46.0",
+        typescript: "^5.5.0",
+      },
+    }, null, 2) + "\n";
+  }
+  if (filePath === "playwright.config.ts") {
+    return [
+      "import { defineConfig, devices } from '@playwright/test';",
+      "",
+      "export default defineConfig({",
+      `  testDir: './${testFolderPath.replace(/^\/+/, "")}',`,
+      "  fullyParallel: true,",
+      "  reporter: [['html'], ['json']],",
+      "  use: {",
+      "    trace: 'on-first-retry',",
+      "    screenshot: 'only-on-failure',",
+      "    video: 'retain-on-failure',",
+      "  },",
+      "  projects: [",
+      "    { name: 'chromium', use: { ...devices['Desktop Chrome'] } },",
+      "  ],",
+      "});",
+      "",
+    ].join("\n");
+  }
+  if (filePath === ".github/workflows/playwright-validation.yml") {
+    return [
+      "name: AI QA Copilot Playwright Validation",
+      "",
+      "on:",
+      "  workflow_dispatch:",
+      "    inputs:",
+      "      test_files:",
+      "        description: 'Comma-separated Playwright test files to run'",
+      "        required: false",
+      "        default: ''",
+      "      validation_branch:",
+      "        description: 'AI QA Copilot validation branch'",
+      "        required: false",
+      "        default: ''",
+      "",
+      "jobs:",
+      "  validate:",
+      "    runs-on: ubuntu-latest",
+      "    steps:",
+      "      - name: Checkout",
+      "        uses: actions/checkout@v4",
+      "      - name: Setup Node",
+      "        uses: actions/setup-node@v4",
+      "        with:",
+      "          node-version: 20",
+      "          cache: npm",
+      "      - name: Install dependencies",
+      "        run: npm ci || npm install",
+      "      - name: Install Playwright browsers",
+      "        run: npx playwright install --with-deps",
+      "      - name: Run Playwright validation",
+      "        shell: bash",
+      "        run: |",
+      "          if [ -n \"${{ github.event.inputs.test_files }}\" ]; then",
+      "            IFS=',' read -ra FILES <<< \"${{ github.event.inputs.test_files }}\"",
+      "            npx playwright test \"${FILES[@]}\" --reporter=json,html --workers=1",
+      "          else",
+      "            npx playwright test --reporter=json,html --workers=1",
+      "          fi",
+      "      - name: Upload Playwright report",
+      "        if: always()",
+      "        uses: actions/upload-artifact@v4",
+      "        with:",
+      "          name: playwright-report",
+      "          path: playwright-report/",
+      "          if-no-files-found: ignore",
+      "",
+    ].join("\n");
+  }
+  if (filePath.endsWith(".spec.ts")) {
+    return [
+      "import { test, expect } from '@playwright/test';",
+      "",
+      "test('AI QA Copilot onboarding smoke test', async ({ page }) => {",
+      "  await page.goto('/');",
+      "  await expect(page).toHaveURL(/.*/);",
+      "});",
+      "",
+    ].join("\n");
+  }
+  return "";
 }
 
 function verifyGitHubSignature(rawBody: Buffer, secret: string, signatureHeader?: string) {
@@ -1224,6 +1326,64 @@ integrationRouter.get("/integrations/github/analysis", asyncRoute(async (request
   const { workspaceId } = z.object({ workspaceId: z.string().min(1) }).parse(request.query);
   if (!(await requireWorkspaceRole(request, response, workspaceId, ["Owner", "Admin", "QA Lead", "QA Engineer"]))) return;
   response.json(await getRepositoryAnalysis(workspaceId));
+}));
+
+integrationRouter.post("/integrations/github/automation-onboarding/initialize", asyncRoute(async (request, response) => {
+  const input = z.object({ workspaceId: z.string().min(1) }).parse(request.body);
+  if (!(await requireWorkspaceRole(request, response, input.workspaceId, ["Owner", "Admin", "QA Lead"]))) return;
+  const runtimeConfig = await getAutomationRepositoryRuntimeConfig(input.workspaceId);
+  if (!runtimeConfig) {
+    response.status(400).json({ message: "Configure GitHub automation repository before Automation Repository Onboarding." });
+    return;
+  }
+  const config = toGitHubConfig(runtimeConfig);
+  const analysis = await getRepositoryAnalysis(input.workspaceId);
+  const missingFiles = new Set(analysis?.missingFiles ?? []);
+  const testFolderPath = analysis?.testFolderPath || runtimeConfig.testFolderPath || "tests";
+  if (!analysis?.githubActionsCompatible) missingFiles.add(".github/workflows/playwright-validation.yml");
+  if (analysis?.framework === "Unknown") missingFiles.add("package.json");
+  if (!analysis || !analysis.scannedFiles.some((file) => file === "playwright.config.ts" || file === "playwright.config.js")) {
+    missingFiles.add("playwright.config.ts");
+  }
+  if (!analysis?.testFolderPath) missingFiles.add(`${testFolderPath.replace(/\/$/, "")}/aiqa-onboarding.spec.ts`);
+  const filesToCreate = [...missingFiles].filter((file) => onboardingFileContent(file, testFolderPath));
+  if (!filesToCreate.length) {
+    response.json({
+      message: "Automation Repository Onboarding is already ready. No missing initialization files were detected.",
+      branchName: null,
+      files: [],
+      pullRequest: null,
+    });
+    return;
+  }
+  const branchName = onboardingBranchName();
+  await createBranch(config, branchName);
+  for (const filePath of filesToCreate) {
+    await createOrReplaceFile(config, {
+      branchName,
+      filePath,
+      content: onboardingFileContent(filePath, testFolderPath),
+      message: `AI QA Copilot: initialize ${filePath}`,
+    });
+  }
+  const pullRequest = await createPullRequest(config, {
+    branchName,
+    title: "AI QA Copilot: Automation Repository Onboarding",
+    body: [
+      "This pull request initializes the automation repository for AI QA Copilot validation.",
+      "",
+      "Created files:",
+      ...filesToCreate.map((file) => `- ${file}`),
+      "",
+      "AI QA Copilot will use this setup to run Playwright validation through GitHub Actions.",
+    ].join("\n"),
+  });
+  response.status(201).json({
+    message: "Automation Repository Onboarding initialization PR created.",
+    branchName,
+    files: filesToCreate,
+    pullRequest,
+  });
 }));
 
 integrationRouter.put("/integrations/github/analysis/override", asyncRoute(async (request, response) => {

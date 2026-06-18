@@ -43,6 +43,18 @@ export interface RepositoryAnalysisSummary {
   importStyle: string;
   pattern: RepositoryAnalysisPattern;
   confidenceScore: number;
+  playwrightVersion?: string;
+  packageManager?: string;
+  githubActionsCompatible?: boolean;
+  onboardingStatus?: "Ready" | "Needs Initialization" | "Needs Review";
+  readinessScore?: number;
+  missingFiles?: string[];
+  recommendedActions?: string[];
+  healthChecks?: Array<{
+    name: string;
+    status: "Passed" | "Failed" | "Warning";
+    message: string;
+  }>;
   scannedFiles: string[];
 }
 
@@ -285,6 +297,10 @@ export async function analyzeGitHubRepository(config: GitHubAutomationConfig): P
   const gradle = contents.get("build.gradle") ?? "";
   const hasPlaywrightConfigTs = paths.includes("playwright.config.ts");
   const hasPlaywrightConfigJs = paths.includes("playwright.config.js");
+  const hasWorkflow = paths.includes(".github/workflows/playwright-validation.yml");
+  const hasPackageLock = paths.includes("package-lock.json");
+  const hasPnpmLock = paths.includes("pnpm-lock.yaml");
+  const hasYarnLock = paths.includes("yarn.lock");
   const hasPackagePlaywright = /@playwright\/test|playwright/i.test(packageJson);
   const hasJavaPlaywright = /com\.microsoft\.playwright|playwright/i.test(pomXml) || /playwright/i.test(gradle);
   const hasTsTests = candidateTestFiles.some((path) => /\.spec\.(ts|tsx)$/i.test(path) || /\.test\.(ts|tsx)$/i.test(path));
@@ -315,6 +331,19 @@ export async function analyzeGitHubRepository(config: GitHubAutomationConfig): P
       : gradle
         ? "Gradle"
         : "Unknown";
+  const packageManager = hasPnpmLock ? "pnpm" : hasYarnLock ? "yarn" : hasPackageLock || packageJson ? "npm" : "Unknown";
+  let playwrightVersion = "Unknown";
+  try {
+    const pkg = packageJson ? JSON.parse(packageJson) : {};
+    playwrightVersion =
+      pkg.devDependencies?.["@playwright/test"] ||
+      pkg.dependencies?.["@playwright/test"] ||
+      pkg.devDependencies?.playwright ||
+      pkg.dependencies?.playwright ||
+      "Unknown";
+  } catch {
+    playwrightVersion = "Unknown";
+  }
   const detectedFolder = commonPrefix(candidateTestFiles) || commonFolders.find((folder) =>
     paths.some((path) => path === folder || path.startsWith(`${folder}/`)),
   ) || config.testFolderPath;
@@ -344,6 +373,55 @@ export async function analyzeGitHubRepository(config: GitHubAutomationConfig): P
   if (existingImportantFiles.length) confidenceScore += Math.min(existingImportantFiles.length * 4, 16);
   if (usesPageObjectModel || usesFixtures) confidenceScore += 8;
   confidenceScore = Math.min(confidenceScore, 98);
+  const missingFiles = [
+    packageJson ? "" : "package.json",
+    hasPlaywrightConfigTs || hasPlaywrightConfigJs ? "" : "playwright.config.ts",
+    hasWorkflow ? "" : ".github/workflows/playwright-validation.yml",
+    detectedFolder ? "" : config.testFolderPath || "tests",
+  ].filter(Boolean);
+  const healthChecks = [
+    {
+      name: "Playwright dependency",
+      status: hasPackagePlaywright || hasJavaPlaywright ? "Passed" as const : "Failed" as const,
+      message: hasPackagePlaywright || hasJavaPlaywright ? "Playwright dependency detected." : "Playwright dependency was not detected.",
+    },
+    {
+      name: "Playwright configuration",
+      status: hasPlaywrightConfigTs || hasPlaywrightConfigJs ? "Passed" as const : "Failed" as const,
+      message: hasPlaywrightConfigTs || hasPlaywrightConfigJs ? "Playwright config detected." : "Playwright config is missing.",
+    },
+    {
+      name: "Package manager",
+      status: packageManager !== "Unknown" ? "Passed" as const : "Warning" as const,
+      message: packageManager !== "Unknown" ? `${packageManager} detected.` : "Package manager could not be determined.",
+    },
+    {
+      name: "GitHub Actions validation workflow",
+      status: hasWorkflow ? "Passed" as const : "Failed" as const,
+      message: hasWorkflow ? "AI QA Copilot validation workflow detected." : "Validation workflow is missing.",
+    },
+    {
+      name: "Test folder",
+      status: detectedFolder ? "Passed" as const : "Warning" as const,
+      message: detectedFolder ? `Test folder detected at ${detectedFolder}.` : "Test folder was not detected.",
+    },
+  ];
+  const readinessScore = Math.max(0, Math.min(100, Math.round(
+    confidenceScore * 0.5 +
+    healthChecks.filter((check) => check.status === "Passed").length * 10,
+  )));
+  const onboardingStatus = missingFiles.length === 0 && readinessScore >= 80
+    ? "Ready"
+    : missingFiles.includes("package.json") || framework === "Unknown"
+      ? "Needs Review"
+      : "Needs Initialization";
+  const recommendedActions = [
+    hasPackagePlaywright || hasJavaPlaywright ? "" : "Add Playwright dependencies to the automation repository.",
+    hasPlaywrightConfigTs || hasPlaywrightConfigJs ? "" : "Generate a Playwright configuration file.",
+    hasWorkflow ? "" : "Configure the AI QA Copilot GitHub Actions validation workflow.",
+    detectedFolder ? "" : `Create a test folder such as ${config.testFolderPath || "tests"}.`,
+    readinessScore < 70 ? "Review detected framework, language, and folder structure before validation." : "",
+  ].filter(Boolean);
   return {
     framework,
     language,
@@ -356,6 +434,14 @@ export async function analyzeGitHubRepository(config: GitHubAutomationConfig): P
     importStyle,
     pattern,
     confidenceScore,
+    playwrightVersion,
+    packageManager,
+    githubActionsCompatible: hasWorkflow,
+    onboardingStatus,
+    readinessScore,
+    missingFiles,
+    recommendedActions,
+    healthChecks,
     scannedFiles: [...new Set([...existingImportantFiles, ...candidateTestFiles.slice(0, 10), ...candidatePageFiles.slice(0, 6), ...candidateFixtureFiles.slice(0, 4)])],
   };
 }

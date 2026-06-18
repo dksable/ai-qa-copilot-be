@@ -782,6 +782,18 @@ export interface RepositoryAnalysis {
   importStyle: string;
   pattern: RepositoryAnalysisPattern;
   confidenceScore: number;
+  playwrightVersion?: string;
+  packageManager?: string;
+  githubActionsCompatible?: boolean;
+  onboardingStatus?: "Ready" | "Needs Initialization" | "Needs Review";
+  readinessScore?: number;
+  missingFiles?: string[];
+  recommendedActions?: string[];
+  healthChecks?: Array<{
+    name: string;
+    status: "Passed" | "Failed" | "Warning";
+    message: string;
+  }>;
   scannedFiles: string[];
   createdBy: string;
   createdAt: string;
