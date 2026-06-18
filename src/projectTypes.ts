@@ -624,6 +624,13 @@ export interface RepositoryValidationRun {
     stdout: string;
     stderr: string;
   }>;
+  validationStageTimings?: Array<{
+    stage: string;
+    status: "Passed" | "Failed" | "Skipped" | "Running" | "Unknown";
+    duration: number;
+    startedAt?: string;
+    completedAt?: string;
+  }>;
   failedTestNames?: string[];
   failedTests?: Array<{
     testFile: string;

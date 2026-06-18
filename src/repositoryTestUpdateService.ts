@@ -307,12 +307,14 @@ export async function validateRepositoryTestUpdatesWithGitHubActions(input: {
   }));
 
   const testFiles = approved.map((update) => update.testFilePath).join(",");
+  const validationBrowser = process.env.AIQA_VALIDATION_BROWSER || "chromium";
   await triggerWorkflowDispatch(input.automationConfig, {
     workflowId: "playwright-validation.yml",
     ref: branchName,
     inputs: {
       test_files: testFiles,
       validation_branch: branchName,
+      browser: validationBrowser,
     },
   });
   debugLogs.push(await buildManualDebugStep({
@@ -320,7 +322,7 @@ export async function validateRepositoryTestUpdatesWithGitHubActions(input: {
     cwd: process.cwd(),
     command: `workflow_dispatch ${PLAYWRIGHT_VALIDATION_WORKFLOW}`,
     status: "Passed",
-    stdout: `Triggered workflow for branch ${branchName}. Test files: ${testFiles || "all"}`,
+    stdout: `Triggered workflow for branch ${branchName}. Browser: ${validationBrowser}. Test files: ${testFiles || "all"}`,
     stderr: "",
     exitCode: 0,
   }));
@@ -329,6 +331,7 @@ export async function validateRepositoryTestUpdatesWithGitHubActions(input: {
   const completedRun = await waitForWorkflowCompletion(input.automationConfig, workflowRun.id);
   const jobs = await listWorkflowRunJobs(input.automationConfig, completedRun.id).catch(() => ({ jobs: [] }));
   const logs = summarizeWorkflowJobs(jobs.jobs);
+  const validationStageTimings = buildWorkflowStageTimings(jobs.jobs);
   debugLogs.push(await buildManualDebugStep({
     stepName: "Poll GitHub Actions result",
     cwd: process.cwd(),
@@ -370,6 +373,7 @@ export async function validateRepositoryTestUpdatesWithGitHubActions(input: {
     stdout: logs,
     stderr: conclusion === "success" ? "" : `Workflow concluded with ${conclusion}.`,
     validationDebugLogs: debugLogs,
+    validationStageTimings,
     failedTestNames: failedTests.map((test) => test.testName),
     failedTests,
     errorDetails: conclusion === "success" ? undefined : `GitHub Actions validation workflow concluded with ${conclusion}.`,
@@ -1302,6 +1306,35 @@ function summarizeWorkflowJobs(jobs: Awaited<ReturnType<typeof listWorkflowRunJo
       steps ? `Steps:\n${steps}` : "",
     ].filter(Boolean).join("\n");
   }).join("\n\n");
+}
+
+function buildWorkflowStageTimings(jobs: Awaited<ReturnType<typeof listWorkflowRunJobs>>["jobs"]): NonNullable<RepositoryValidationRun["validationStageTimings"]> {
+  const steps = jobs.flatMap((job) => job.steps ?? []);
+  const stageFor = (name: string) => {
+    const value = name.toLowerCase();
+    if (value.includes("checkout")) return "Repository checkout";
+    if (value.includes("setup node") || value.includes("restore node") || value.includes("npm cache")) return "Cache restore";
+    if (value.includes("install dependencies")) return "Dependency install";
+    if (value.includes("playwright browser") || value.includes("browser install")) return "Browser install";
+    if (value.includes("run playwright")) return "Test execution";
+    if (value.includes("upload")) return "Artifact upload";
+    return name;
+  };
+  return steps.map((step) => {
+    const status =
+      step.conclusion === "success" ? "Passed" :
+      step.conclusion === "failure" || step.conclusion === "cancelled" || step.conclusion === "timed_out" ? "Failed" :
+      step.conclusion === "skipped" ? "Skipped" :
+      step.status === "in_progress" ? "Running" :
+      "Unknown";
+    return {
+      stage: stageFor(step.name),
+      status,
+      duration: durationBetween(step.started_at, step.completed_at),
+      startedAt: step.started_at ?? undefined,
+      completedAt: step.completed_at ?? undefined,
+    };
+  });
 }
 
 export function buildFailureSuggestion(run: RepositoryValidationRun) {

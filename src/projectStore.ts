@@ -610,6 +610,7 @@ function normalizeRepositoryValidationRun(run: RepositoryValidationRun): Reposit
     stdout: run.stdout ?? "",
     stderr: run.stderr ?? "",
     validationDebugLogs: run.validationDebugLogs ?? [],
+    validationStageTimings: run.validationStageTimings ?? [],
     failedTestNames: run.failedTestNames ?? [],
     failedTests: run.failedTests ?? [],
     screenshots: run.screenshots ?? [],
