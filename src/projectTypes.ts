@@ -84,6 +84,17 @@ export type RepositoryUpdatePullRequestStatus = "Created" | "Failed";
 export type RepositoryValidationReleaseRecommendation = "Safe to Merge" | "Merge with Caution" | "Do Not Merge";
 export type RepositoryValidationMergeDecision = "Approved" | "Warning" | "Blocked";
 export type RepositoryValidationRecommendationStatus = "Generated" | "Regenerated" | "Failed";
+export type ValidationFailureCategory =
+  | "Locator Issue"
+  | "Assertion Issue"
+  | "App Flow Change"
+  | "Test Data Issue"
+  | "Network/API Issue"
+  | "Environment Issue"
+  | "Dependency Issue"
+  | "Unknown";
+export type ValidationAutoFixStatus = "Pending" | "Approved" | "Rejected" | "Edited";
+export type ReleaseReadinessRecommendation = "Ready for Release" | "Proceed with Caution" | "Not Recommended for Release";
 export type PlaywrightValidationStatus = "Queued" | "Running" | "Passed" | "Failed" | "Warning" | "Error";
 export type PlaywrightValidationSeverity = "Info" | "Warning" | "Error";
 
@@ -664,6 +675,77 @@ export interface RepositoryValidationRecommendation {
   updatedAt: string;
 }
 
+export interface ValidationFailureAnalysis {
+  id: string;
+  workspaceId: string;
+  projectId?: string;
+  validationRunId: string;
+  rootCause: string;
+  category: ValidationFailureCategory;
+  affectedModule: string;
+  affectedTestFile: string;
+  confidenceScore: number;
+  recommendedFix: string;
+  autoFixAvailable: boolean;
+  riskLevel: RepositoryRiskLevel;
+  aiProvider: string;
+  aiModel: string;
+  createdAt: string;
+}
+
+export interface ValidationAutoFix {
+  id: string;
+  workspaceId: string;
+  projectId?: string;
+  validationRunId: string;
+  failureAnalysisId: string;
+  testFilePath: string;
+  oldCode: string;
+  fixedCode: string;
+  fixSummary: string;
+  status: ValidationAutoFixStatus;
+  confidenceScore: number;
+  createdBy?: string;
+  createdAt: string;
+  updatedAt: string;
+}
+
+export interface ValidationRetryAttempt {
+  id: string;
+  workspaceId: string;
+  projectId?: string;
+  validationRunId: string;
+  retryValidationRunId?: string;
+  attemptNumber: number;
+  status: RepositoryValidationRunStatus;
+  passed: number;
+  failed: number;
+  skipped: number;
+  duration: number;
+  workflowRunId?: number;
+  workflowUrl?: string;
+  createdBy?: string;
+  createdAt: string;
+}
+
+export interface ReleaseReadinessSnapshot {
+  id: string;
+  workspaceId: string;
+  projectId?: string;
+  releaseName?: string;
+  readinessScore: number;
+  recommendation: ReleaseReadinessRecommendation;
+  automationPassRate: number;
+  failedValidations: number;
+  openHighRiskChanges: number;
+  pendingFixes: number;
+  prsWaitingForReview: number;
+  coverageScore: number;
+  manualExecutionPassRate: number;
+  riskSummary: Record<string, number>;
+  createdAt: string;
+}
+
 export interface RepositoryAnalysis {
   id: string;
   workspaceId: string;
@@ -907,6 +989,10 @@ export interface ProjectDatabase {
   repositoryGeneratedTestUpdates: RepositoryGeneratedTestUpdate[];
   repositoryValidationRuns: RepositoryValidationRun[];
   repositoryValidationRecommendations: RepositoryValidationRecommendation[];
+  validationFailureAnalyses: ValidationFailureAnalysis[];
+  validationAutoFixes: ValidationAutoFix[];
+  validationRetryAttempts: ValidationRetryAttempt[];
+  releaseReadinessSnapshots: ReleaseReadinessSnapshot[];
   repositoryUpdatePullRequests: RepositoryUpdatePullRequest[];
   repositoryAnalyses: RepositoryAnalysis[];
   repositorySyncs: RepositorySync[];

@@ -51,6 +51,7 @@ import type {
   RepositoryUpdatePullRequest,
   RepositoryValidationRun,
   RepositoryValidationRecommendation,
+  ReleaseReadinessSnapshot,
   RepositoryAISuggestion,
   RepositoryChangedFile,
   RepositoryGeneratedUpdate,
@@ -58,6 +59,9 @@ import type {
   RepositoryPrPreview,
   RepositoryRiskLevel,
   RepositorySync,
+  ValidationAutoFix,
+  ValidationFailureAnalysis,
+  ValidationRetryAttempt,
   Project,
   ProjectDatabase,
   ProjectDomain,
@@ -275,6 +279,10 @@ const initialDb: ProjectDatabase = {
   repositoryGeneratedTestUpdates: [],
   repositoryValidationRuns: [],
   repositoryValidationRecommendations: [],
+  validationFailureAnalyses: [],
+  validationAutoFixes: [],
+  validationRetryAttempts: [],
+  releaseReadinessSnapshots: [],
   repositoryUpdatePullRequests: [],
   repositoryAnalyses: [],
   repositorySyncs: [],
@@ -437,6 +445,10 @@ function normalizeDatabase(db: ProjectDatabase): ProjectDatabase {
     repositoryGeneratedTestUpdates: (db.repositoryGeneratedTestUpdates ?? []).map(normalizeRepositoryGeneratedTestUpdate),
     repositoryValidationRuns: (db.repositoryValidationRuns ?? []).map(normalizeRepositoryValidationRun),
     repositoryValidationRecommendations: (db.repositoryValidationRecommendations ?? []).map(normalizeRepositoryValidationRecommendation),
+    validationFailureAnalyses: db.validationFailureAnalyses ?? [],
+    validationAutoFixes: db.validationAutoFixes ?? [],
+    validationRetryAttempts: db.validationRetryAttempts ?? [],
+    releaseReadinessSnapshots: db.releaseReadinessSnapshots ?? [],
     repositoryUpdatePullRequests: db.repositoryUpdatePullRequests ?? [],
     repositoryAnalyses: (db.repositoryAnalyses ?? []).map(normalizeRepositoryAnalysis),
     repositorySyncs: (db.repositorySyncs ?? []).map(normalizeRepositorySync),
@@ -2557,6 +2569,24 @@ export async function getLatestRepositoryValidationRun(impactAnalysisId: string)
     .sort((a, b) => b.createdAt.localeCompare(a.createdAt))[0] ?? null;
 }
 
+export async function getRepositoryValidationRun(validationRunId: string) {
+  const db = await readDb();
+  return db.repositoryValidationRuns.find((run) => run.id === validationRunId) ?? null;
+}
+
+export async function listRepositoryValidationRuns(filters: {
+  workspaceId?: string;
+  projectId?: string;
+  status?: string;
+} = {}) {
+  const db = await readDb();
+  return db.repositoryValidationRuns
+    .filter((run) => !filters.workspaceId || run.workspaceId === filters.workspaceId)
+    .filter((run) => !filters.projectId || run.projectId === filters.projectId)
+    .filter((run) => !filters.status || run.status === filters.status)
+    .sort((a, b) => b.createdAt.localeCompare(a.createdAt));
+}
+
 export async function updateRepositoryValidationRun(
   runId: string,
   input: Partial<Omit<RepositoryValidationRun, "id" | "createdAt">>,
@@ -2567,6 +2597,100 @@ export async function updateRepositoryValidationRun(
   Object.assign(run, input);
   await writeDb(db);
   return run;
+}
+
+export async function saveValidationFailureAnalysis(
+  input: Omit<ValidationFailureAnalysis, "id" | "createdAt">,
+) {
+  const db = await readDb();
+  const existing = db.validationFailureAnalyses.find((item) => item.validationRunId === input.validationRunId);
+  if (existing) {
+    Object.assign(existing, input);
+    await writeDb(db);
+    return existing;
+  }
+  const analysis: ValidationFailureAnalysis = {
+    ...input,
+    id: createId("validation_failure"),
+    createdAt: now(),
+  };
+  db.validationFailureAnalyses.unshift(analysis);
+  await writeDb(db);
+  return analysis;
+}
+
+export async function getValidationFailureAnalysis(validationRunId: string) {
+  const db = await readDb();
+  return db.validationFailureAnalyses.find((analysis) => analysis.validationRunId === validationRunId) ?? null;
+}
+
+export async function saveValidationAutoFix(input: Omit<ValidationAutoFix, "id" | "createdAt" | "updatedAt">) {
+  const db = await readDb();
+  const timestamp = now();
+  const fix: ValidationAutoFix = {
+    ...input,
+    id: createId("validation_fix"),
+    createdAt: timestamp,
+    updatedAt: timestamp,
+  };
+  db.validationAutoFixes.unshift(fix);
+  await writeDb(db);
+  return fix;
+}
+
+export async function listValidationAutoFixes(validationRunId: string) {
+  const db = await readDb();
+  return db.validationAutoFixes
+    .filter((fix) => fix.validationRunId === validationRunId)
+    .sort((a, b) => b.createdAt.localeCompare(a.createdAt));
+}
+
+export async function getValidationAutoFix(fixId: string) {
+  const db = await readDb();
+  return db.validationAutoFixes.find((fix) => fix.id === fixId) ?? null;
+}
+
+export async function updateValidationAutoFix(
+  fixId: string,
+  input: Partial<Pick<ValidationAutoFix, "status" | "fixedCode" | "fixSummary" | "confidenceScore">>,
+) {
+  const db = await readDb();
+  const fix = db.validationAutoFixes.find((item) => item.id === fixId);
+  if (!fix) return null;
+  Object.assign(fix, input, { updatedAt: now() });
+  await writeDb(db);
+  return fix;
+}
+
+export async function saveValidationRetryAttempt(input: Omit<ValidationRetryAttempt, "id" | "createdAt">) {
+  const db = await readDb();
+  const attempt: ValidationRetryAttempt = {
+    ...input,
+    id: createId("validation_retry"),
+    createdAt: now(),
+  };
+  db.validationRetryAttempts.unshift(attempt);
+  await writeDb(db);
+  return attempt;
+}
+
+export async function listValidationRetryAttempts(validationRunId: string) {
+  const db = await readDb();
+  return db.validationRetryAttempts
+    .filter((attempt) => attempt.validationRunId === validationRunId)
+    .sort((a, b) => a.attemptNumber - b.attemptNumber);
+}
+
+export async function saveReleaseReadinessSnapshot(input: Omit<ReleaseReadinessSnapshot, "id" | "createdAt">) {
+  const db = await readDb();
+  const snapshot: ReleaseReadinessSnapshot = {
+    ...input,
+    id: createId("release_readiness"),
+    createdAt: now(),
+  };
+  db.releaseReadinessSnapshots.unshift(snapshot);
+  await writeDb(db);
+  return snapshot;
 }
 
 export async function saveRepositoryValidationRecommendation(

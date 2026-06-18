@@ -32,22 +32,32 @@ import {
   getRepositoryImpactAnalysis,
   getRepositoryImpactAnalysisByActivity,
   getRepositoryGeneratedTestUpdate,
+  getRepositoryValidationRun,
   getLatestRepositoryValidationRun,
   getLatestRepositoryValidationRecommendation,
+  getValidationAutoFix,
+  getValidationFailureAnalysis,
   getRepositorySync,
   latestRepositorySync,
   listApplicationRepositoryConfigs,
   listRepositoryActivities,
   listRepositoryGeneratedTestUpdates,
+  listRepositoryValidationRuns,
+  listValidationAutoFixes,
+  listValidationRetryAttempts,
   listRepositorySyncs,
   overrideRepositoryAnalysis,
   createRepositorySync,
   resolveAIProviderForFeature,
+  saveReleaseReadinessSnapshot,
   saveApplicationRepositoryConfig,
   saveRepositoryGeneratedTestUpdates,
   saveRepositoryUpdatePullRequest,
   saveRepositoryValidationRun,
   saveRepositoryValidationRecommendation,
+  saveValidationAutoFix,
+  saveValidationFailureAnalysis,
+  saveValidationRetryAttempt,
   saveRepositoryImpactAnalysis,
   saveRepositoryAnalysis,
   saveAutomationRepositoryConfig,
@@ -55,6 +65,7 @@ import {
   updateRepositoryImpactAnalysisStatus,
   updateRepositoryGeneratedTestUpdate,
   updateRepositoryValidationRun,
+  updateValidationAutoFix,
   updateRepositoryActivityStatus,
   updateRepositorySyncGeneratedUpdates,
   updateRepositorySyncPr,
@@ -74,6 +85,7 @@ import type { RepositoryActivityChangedFile, RepositoryChangeType, RepositoryRis
 
 export const integrationRouter = Router();
 export const githubWebhookRouter = Router();
+const defaultWorkspaceId = "workspace_default";
 
 const GitHubConfigSchema = z.object({
   workspaceId: z.string().min(1),
@@ -815,6 +827,328 @@ integrationRouter.post("/integrations/github/impact-analysis/:impactAnalysisId/v
     createdBy: request.userId,
   });
   response.status(201).json(await saveRepositoryValidationRecommendation(recommendation));
+}));
+
+integrationRouter.post("/validation/:validationRunId/failure-analysis", asyncRoute(async (request, response) => {
+  const run = await getRepositoryValidationRun(String(request.params.validationRunId));
+  if (!run) {
+    response.status(404).json({ message: "Validation run not found." });
+    return;
+  }
+  if (!(await requireWorkspaceRole(request, response, run.workspaceId, ["Owner", "Admin", "QA Lead", "QA Engineer"]))) return;
+  const existing = await getValidationFailureAnalysis(run.id);
+  if (existing) {
+    response.json(existing);
+    return;
+  }
+  const analysis = await getRepositoryImpactAnalysis(run.impactAnalysisId);
+  const provider = await resolveAIProviderForFeature(run.workspaceId, "playwright-validation-failure");
+  const failedTest = run.failedTests?.[0];
+  const affectedTestFile = failedTest?.testFile || run.failedTestNames?.[0] || analysis?.impactedTests[0]?.testFilePath || "Unknown";
+  const logs = `${run.errorDetails ?? ""}\n${run.stderr ?? ""}\n${run.stdout ?? ""}`.toLowerCase();
+  const category = logs.includes("locator") || logs.includes("strict mode") || logs.includes("getby")
+    ? "Locator Issue"
+    : logs.includes("expect") || logs.includes("assert")
+      ? "Assertion Issue"
+      : logs.includes("timeout") || logs.includes("navigation")
+        ? "App Flow Change"
+        : logs.includes("network") || logs.includes("api")
+          ? "Network/API Issue"
+          : logs.includes("module") || logs.includes("package") || logs.includes("dependency")
+            ? "Dependency Issue"
+            : run.validationProvider === "backend-fallback"
+              ? "Environment Issue"
+              : "Unknown";
+  const riskLevel = run.failed > 0 ? "High" : "Low";
+  const saved = await saveValidationFailureAnalysis({
+    workspaceId: run.workspaceId,
+    projectId: run.projectId,
+    validationRunId: run.id,
+    rootCause: failedTest?.errorMessage || run.errorDetails || "Validation failed and requires review of workflow logs.",
+    category,
+    affectedModule: analysis?.impactedModules[0] || "Unknown",
+    affectedTestFile,
+    confidenceScore: category === "Unknown" ? 68 : 86,
+    recommendedFix: category === "Locator Issue"
+      ? "Review locators and prefer resilient Playwright locators such as getByRole, getByLabel, or getByTestId."
+      : category === "Assertion Issue"
+        ? "Update the expected result or assertion to match the changed application behavior."
+        : "Review the failed flow, generated update, and application change before retrying validation.",
+    autoFixAvailable: category !== "Dependency Issue" && category !== "Environment Issue" && affectedTestFile !== "Unknown",
+    riskLevel,
+    aiProvider: provider?.providerName ?? "AI QA Copilot Default AI",
+    aiModel: provider?.modelName ?? process.env.GROQ_MODEL ?? "llama-3.3-70b-versatile",
+  });
+  await createAIProviderUsageLog({
+    workspaceId: run.workspaceId,
+    providerType: provider?.providerType ?? "default",
+    providerName: provider?.providerName ?? "AI QA Copilot Default AI",
+    modelName: provider?.modelName ?? process.env.GROQ_MODEL ?? "llama-3.3-70b-versatile",
+    featureName: "playwright-validation-failure",
+    status: "Success",
+    createdBy: request.userId,
+  });
+  response.status(201).json(saved);
+}));
+
+integrationRouter.get("/validation/:validationRunId/failure-analysis", asyncRoute(async (request, response) => {
+  const run = await getRepositoryValidationRun(String(request.params.validationRunId));
+  if (!run) {
+    response.status(404).json({ message: "Validation run not found." });
+    return;
+  }
+  if (!(await requireWorkspaceRole(request, response, run.workspaceId, ["Owner", "Admin", "QA Lead", "QA Engineer", "Viewer"]))) return;
+  const analysis = await getValidationFailureAnalysis(run.id);
+  if (!analysis) {
+    response.status(404).json({ message: "Failure analysis not found." });
+    return;
+  }
+  response.json(analysis);
+}));
+
+integrationRouter.post("/validation/:validationRunId/auto-fix", asyncRoute(async (request, response) => {
+  const run = await getRepositoryValidationRun(String(request.params.validationRunId));
+  if (!run) {
+    response.status(404).json({ message: "Validation run not found." });
+    return;
+  }
+  if (!(await requireWorkspaceRole(request, response, run.workspaceId, ["Owner", "Admin", "QA Lead", "QA Engineer"]))) return;
+  const failureAnalysis = await getValidationFailureAnalysis(run.id);
+  if (!failureAnalysis) {
+    response.status(400).json({ message: "Run AI failure analysis before generating an auto fix." });
+    return;
+  }
+  if (!failureAnalysis.autoFixAvailable) {
+    response.status(400).json({ message: "Auto-fix is not available for this failure category." });
+    return;
+  }
+  const updates = await listRepositoryGeneratedTestUpdates(run.impactAnalysisId);
+  const target = updates.find((update) => update.testFilePath === failureAnalysis.affectedTestFile) ?? updates[0];
+  if (!target) {
+    response.status(400).json({ message: "No generated Playwright update is available for auto-fix." });
+    return;
+  }
+  const fixedCode = [
+    target.newCode.trimEnd(),
+    "",
+    `// AI QA Copilot auto-fix suggestion: ${failureAnalysis.recommendedFix}`,
+    "// Review and approve this fix before retrying validation.",
+  ].join("\n");
+  const saved = await saveValidationAutoFix({
+    workspaceId: run.workspaceId,
+    projectId: run.projectId,
+    validationRunId: run.id,
+    failureAnalysisId: failureAnalysis.id,
+    testFilePath: target.testFilePath,
+    oldCode: target.newCode,
+    fixedCode,
+    fixSummary: `AI suggested fix for ${failureAnalysis.category}: ${failureAnalysis.recommendedFix}`,
+    status: "Pending",
+    confidenceScore: Math.max(60, failureAnalysis.confidenceScore - 4),
+    createdBy: request.userId,
+  });
+  response.status(201).json(saved);
+}));
+
+integrationRouter.get("/validation/:validationRunId/auto-fix", asyncRoute(async (request, response) => {
+  const run = await getRepositoryValidationRun(String(request.params.validationRunId));
+  if (!run) {
+    response.status(404).json({ message: "Validation run not found." });
+    return;
+  }
+  if (!(await requireWorkspaceRole(request, response, run.workspaceId, ["Owner", "Admin", "QA Lead", "QA Engineer", "Viewer"]))) return;
+  response.json(await listValidationAutoFixes(run.id));
+}));
+
+integrationRouter.patch("/validation/auto-fix/:fixId/approve", asyncRoute(async (request, response) => {
+  const fix = await getValidationAutoFix(String(request.params.fixId));
+  if (!fix) {
+    response.status(404).json({ message: "Auto fix not found." });
+    return;
+  }
+  if (!(await requireWorkspaceRole(request, response, fix.workspaceId, ["Owner", "Admin", "QA Lead", "QA Engineer"]))) return;
+  const run = await getRepositoryValidationRun(fix.validationRunId);
+  const updates = run ? await listRepositoryGeneratedTestUpdates(run.impactAnalysisId) : [];
+  const target = updates.find((update) => update.testFilePath === fix.testFilePath);
+  if (target) {
+    await updateRepositoryGeneratedTestUpdate(target.id, {
+      status: "Edited",
+      newCode: fix.fixedCode,
+      updateSummary: fix.fixSummary,
+      confidenceScore: fix.confidenceScore,
+    });
+  }
+  response.json(await updateValidationAutoFix(fix.id, { status: "Approved" }));
+}));
+
+integrationRouter.patch("/validation/auto-fix/:fixId/reject", asyncRoute(async (request, response) => {
+  const fix = await getValidationAutoFix(String(request.params.fixId));
+  if (!fix) {
+    response.status(404).json({ message: "Auto fix not found." });
+    return;
+  }
+  if (!(await requireWorkspaceRole(request, response, fix.workspaceId, ["Owner", "Admin", "QA Lead", "QA Engineer"]))) return;
+  response.json(await updateValidationAutoFix(fix.id, { status: "Rejected" }));
+}));
+
+integrationRouter.patch("/validation/auto-fix/:fixId/edit", asyncRoute(async (request, response) => {
+  const body = z.object({ fixedCode: z.string().min(1), fixSummary: z.string().optional() }).parse(request.body);
+  const fix = await getValidationAutoFix(String(request.params.fixId));
+  if (!fix) {
+    response.status(404).json({ message: "Auto fix not found." });
+    return;
+  }
+  if (!(await requireWorkspaceRole(request, response, fix.workspaceId, ["Owner", "Admin", "QA Lead", "QA Engineer"]))) return;
+  response.json(await updateValidationAutoFix(fix.id, {
+    status: "Edited",
+    fixedCode: body.fixedCode,
+    fixSummary: body.fixSummary ?? fix.fixSummary,
+  }));
+}));
+
+integrationRouter.post("/validation/:validationRunId/retry", asyncRoute(async (request, response) => {
+  const previousRun = await getRepositoryValidationRun(String(request.params.validationRunId));
+  if (!previousRun) {
+    response.status(404).json({ message: "Validation run not found." });
+    return;
+  }
+  if (!(await requireWorkspaceRole(request, response, previousRun.workspaceId, ["Owner", "Admin", "QA Lead", "QA Engineer"]))) return;
+  const attempts = await listValidationRetryAttempts(previousRun.id);
+  if (attempts.length >= 3) {
+    response.status(400).json({ message: "Maximum retry attempts reached." });
+    return;
+  }
+  const analysis = await getRepositoryImpactAnalysis(previousRun.impactAnalysisId);
+  const runtimeConfig = analysis ? await getAutomationRepositoryRuntimeConfig(analysis.workspaceId) : null;
+  if (!analysis || !runtimeConfig) {
+    response.status(400).json({ message: "Impact analysis or automation repository config is missing." });
+    return;
+  }
+  const updates = await listRepositoryGeneratedTestUpdates(analysis.id);
+  const run = await validateRepositoryTestUpdatesWithGitHubActions({
+    impactAnalysis: analysis,
+    updates,
+    automationConfig: toGitHubConfig(runtimeConfig),
+    createdBy: request.userId,
+  }).catch(() => validateRepositoryTestUpdates({
+    impactAnalysis: analysis,
+    updates,
+    automationConfig: toGitHubConfig(runtimeConfig),
+    createdBy: request.userId,
+  }));
+  const savedRun = await saveRepositoryValidationRun(run);
+  const retry = await saveValidationRetryAttempt({
+    workspaceId: previousRun.workspaceId,
+    projectId: previousRun.projectId,
+    validationRunId: previousRun.id,
+    retryValidationRunId: savedRun.id,
+    attemptNumber: attempts.length + 2,
+    status: savedRun.status,
+    passed: savedRun.passed,
+    failed: savedRun.failed,
+    skipped: savedRun.skipped,
+    duration: savedRun.duration,
+    workflowRunId: savedRun.workflowRunId,
+    workflowUrl: savedRun.workflowRunUrl,
+    createdBy: request.userId,
+  });
+  response.status(201).json({ retry, validationRun: savedRun });
+}));
+
+integrationRouter.get("/validation/:validationRunId/retries", asyncRoute(async (request, response) => {
+  const run = await getRepositoryValidationRun(String(request.params.validationRunId));
+  if (!run) {
+    response.status(404).json({ message: "Validation run not found." });
+    return;
+  }
+  if (!(await requireWorkspaceRole(request, response, run.workspaceId, ["Owner", "Admin", "QA Lead", "QA Engineer", "Viewer"]))) return;
+  response.json(await listValidationRetryAttempts(run.id));
+}));
+
+integrationRouter.get("/validation/history", asyncRoute(async (request, response) => {
+  const filters = z.object({
+    workspaceId: z.string().optional(),
+    projectId: z.string().optional(),
+    status: z.string().optional(),
+  }).parse(request.query);
+  const workspaceId = filters.workspaceId ?? defaultWorkspaceId;
+  if (workspaceId && !(await requireWorkspaceRole(request, response, workspaceId, ["Owner", "Admin", "QA Lead", "QA Engineer", "Viewer"]))) return;
+  response.json(await listRepositoryValidationRuns({ ...filters, workspaceId }));
+}));
+
+integrationRouter.get("/validation/history/:validationRunId", asyncRoute(async (request, response) => {
+  const run = await getRepositoryValidationRun(String(request.params.validationRunId));
+  if (!run) {
+    response.status(404).json({ message: "Validation run not found." });
+    return;
+  }
+  if (!(await requireWorkspaceRole(request, response, run.workspaceId, ["Owner", "Admin", "QA Lead", "QA Engineer", "Viewer"]))) return;
+  response.json({
+    validationRun: run,
+    failureAnalysis: await getValidationFailureAnalysis(run.id),
+    autoFixes: await listValidationAutoFixes(run.id),
+    retries: await listValidationRetryAttempts(run.id),
+    recommendation: await getLatestRepositoryValidationRecommendation(run.impactAnalysisId),
+  });
+}));
+
+integrationRouter.get("/release-readiness/summary", asyncRoute(async (request, response) => {
+  const workspaceId = z.object({ workspaceId: z.string().optional() }).parse(request.query).workspaceId ?? defaultWorkspaceId;
+  if (workspaceId && !(await requireWorkspaceRole(request, response, workspaceId, ["Owner", "Admin", "QA Lead", "QA Engineer", "Viewer"]))) return;
+  const runs = await listRepositoryValidationRuns({ workspaceId });
+  const failedValidations = runs.filter((run) => run.status === "Failed" || run.status === "Error").length;
+  const completed = runs.filter((run) => ["Passed", "Failed", "Completed", "Error"].includes(run.status));
+  const passed = completed.filter((run) => run.status === "Passed").length;
+  const automationPassRate = completed.length ? Math.round((passed / completed.length) * 100) : 0;
+  const pendingFixes = runs.length ? (await Promise.all(runs.slice(0, 25).map((run) => listValidationAutoFixes(run.id))))
+    .flat()
+    .filter((fix) => fix.status === "Pending").length : 0;
+  const openHighRiskChanges = failedValidations + pendingFixes;
+  const readinessScore = Math.max(0, Math.min(100, automationPassRate - failedValidations * 8 - pendingFixes * 5));
+  const recommendation = readinessScore >= 90 ? "Ready for Release" : readinessScore >= 70 ? "Proceed with Caution" : "Not Recommended for Release";
+  const snapshot = await saveReleaseReadinessSnapshot({
+    workspaceId: workspaceId ?? "workspace_default",
+    readinessScore,
+    recommendation,
+    automationPassRate,
+    failedValidations,
+    openHighRiskChanges,
+    pendingFixes,
+    prsWaitingForReview: 0,
+    coverageScore: 0,
+    manualExecutionPassRate: 0,
+    riskSummary: {
+      failedValidations,
+      pendingFixes,
+      passedValidations: passed,
+    },
+  });
+  response.json(snapshot);
+}));
+
+integrationRouter.get("/release-readiness/project/:projectId", asyncRoute(async (request, response) => {
+  const projectId = String(request.params.projectId);
+  const runs = await listRepositoryValidationRuns({ projectId });
+  const workspaceId = runs[0]?.workspaceId ?? defaultWorkspaceId;
+  if (!(await requireWorkspaceRole(request, response, workspaceId, ["Owner", "Admin", "QA Lead", "QA Engineer", "Viewer"]))) return;
+  const failedValidations = runs.filter((run) => run.status === "Failed" || run.status === "Error").length;
+  const passed = runs.filter((run) => run.status === "Passed").length;
+  const automationPassRate = runs.length ? Math.round((passed / runs.length) * 100) : 0;
+  const readinessScore = Math.max(0, Math.min(100, automationPassRate - failedValidations * 10));
+  response.json(await saveReleaseReadinessSnapshot({
+    workspaceId,
+    projectId,
+    readinessScore,
+    recommendation: readinessScore >= 90 ? "Ready for Release" : readinessScore >= 70 ? "Proceed with Caution" : "Not Recommended for Release",
+    automationPassRate,
+    failedValidations,
+    openHighRiskChanges: failedValidations,
+    pendingFixes: 0,
+    prsWaitingForReview: 0,
+    coverageScore: 0,
+    manualExecutionPassRate: 0,
+    riskSummary: { failedValidations, passedValidations: passed },
+  }));
 }));
 
 integrationRouter.post("/integrations/github/impact-analysis/:impactAnalysisId/create-pr", asyncRoute(async (request, response) => {
