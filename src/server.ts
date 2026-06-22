@@ -10,6 +10,7 @@ import { aiProviderRouter } from "./aiProviderRoutes.js";
 import { analyticsRouter } from "./analyticsRoutes.js";
 import { authRouter } from "./authRoutes.js";
 import { exportRouter } from "./exportRoutes.js";
+import { extensionRouter } from "./extensionRoutes.js";
 import { githubWebhookRouter, integrationRouter } from "./integrationRoutes.js";
 import { requireAuth } from "./permissionMiddleware.js";
 import { playwrightValidationRouter } from "./playwrightValidationRoutes.js";
@@ -27,6 +28,7 @@ const allowedOrigins = (process.env.CORS_ORIGIN ?? "*")
   .map((origin) => origin.trim())
   .filter(Boolean);
 const localhostDevOrigin = /^https?:\/\/(localhost|127\.0\.0\.1):\d+$/;
+const chromeExtensionOrigin = /^chrome-extension:\/\/[a-zA-Z0-9]+$/;
 
 const GenerateRequestSchema = z.object({
   requirement: z.string().trim().min(10).max(8000),
@@ -43,7 +45,8 @@ app.use(
         allowedOrigins.includes("*") ||
         !origin ||
         allowedOrigins.includes(origin) ||
-        localhostDevOrigin.test(origin)
+        localhostDevOrigin.test(origin) ||
+        chromeExtensionOrigin.test(origin)
       ) {
         callback(null, true);
         return;
@@ -54,7 +57,7 @@ app.use(
 );
 app.options("*", cors());
 app.use(express.json({
-  limit: "1mb",
+  limit: "10mb",
   verify: (request, _response, buffer) => {
     (request as typeof request & { rawBody?: Buffer }).rawBody = Buffer.from(buffer);
   },
@@ -86,6 +89,7 @@ app.use("/api", projectRouter);
 app.use("/api", pricingRouter);
 app.use("/api", analyticsRouter);
 app.use("/api", exportRouter);
+app.use("/api", extensionRouter);
 app.use("/api", integrationRouter);
 app.use("/api", playwrightValidationRouter);
 app.use("/api", aiChatRouter);

@@ -984,6 +984,63 @@ export interface PlaywrightValidationJob {
   updatedAt: string;
 }
 
+export type ExtensionReportType =
+  | "analysis"
+  | "test-cases"
+  | "bug-report"
+  | "edge-cases"
+  | "playwright"
+  | "element-inspection"
+  | "screenshot-report"
+  | "chat"
+  | "console-analysis"
+  | "network-analysis"
+  | "accessibility"
+  | "performance"
+  | "regression"
+  | "release-summary";
+
+export interface ExtensionPageData {
+  url: string;
+  title: string;
+  headings: string[];
+  buttons: string[];
+  inputs: Array<{
+    type: string;
+    name?: string;
+    id?: string;
+    placeholder?: string;
+    label?: string;
+  }>;
+  links: Array<{
+    text: string;
+    href: string;
+  }>;
+  forms: Array<{
+    id?: string;
+    name?: string;
+    action?: string;
+    method?: string;
+    inputs: number;
+  }>;
+  visibleTextSummary: string;
+  domStructure: string[];
+  capturedAt?: string;
+}
+
+export interface ExtensionReport {
+  id: string;
+  workspaceId?: string;
+  userId?: string;
+  type: ExtensionReportType;
+  pageUrl: string;
+  pageTitle: string;
+  pageData: ExtensionPageData;
+  output: unknown;
+  createdAt: string;
+  updatedAt: string;
+}
+
 export interface DashboardStats {
   totalProjects: number;
   activeProjects: number;
@@ -1033,6 +1090,7 @@ export interface ProjectDatabase {
   repositoryAnalyses: RepositoryAnalysis[];
   repositorySyncs: RepositorySync[];
   playwrightValidations: PlaywrightValidationJob[];
+  extensionReports: ExtensionReport[];
   testRuns: TestRun[];
   testExecutions: TestExecution[];
   testExecutionHistories: TestExecutionHistory[];

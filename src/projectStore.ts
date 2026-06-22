@@ -59,6 +59,9 @@ import type {
   RepositoryPrPreview,
   RepositoryRiskLevel,
   RepositorySync,
+  ExtensionPageData,
+  ExtensionReport,
+  ExtensionReportType,
   ValidationAutoFix,
   ValidationFailureAnalysis,
   ValidationRetryAttempt,
@@ -287,6 +290,7 @@ const initialDb: ProjectDatabase = {
   repositoryAnalyses: [],
   repositorySyncs: [],
   playwrightValidations: [],
+  extensionReports: [],
   testRuns: [],
   testExecutions: [],
   testExecutionHistories: [],
@@ -453,6 +457,7 @@ function normalizeDatabase(db: ProjectDatabase): ProjectDatabase {
     repositoryAnalyses: (db.repositoryAnalyses ?? []).map(normalizeRepositoryAnalysis),
     repositorySyncs: (db.repositorySyncs ?? []).map(normalizeRepositorySync),
     playwrightValidations: (db.playwrightValidations ?? []).map(normalizePlaywrightValidation),
+    extensionReports: (db.extensionReports ?? []).map(normalizeExtensionReport),
     testRuns: db.testRuns ?? [],
     testExecutions: (db.testExecutions ?? []).map(normalizeTestExecution),
     testExecutionHistories: db.testExecutionHistories ?? [],
@@ -696,6 +701,29 @@ function normalizePlaywrightValidation(job: PlaywrightValidationJob): Playwright
     status: job.status ?? "Queued",
     createdAt: timestamp,
     updatedAt: job.updatedAt ?? timestamp,
+  };
+}
+
+function normalizeExtensionReport(report: ExtensionReport): ExtensionReport {
+  const timestamp = report.createdAt ?? now();
+  return {
+    ...report,
+    type: report.type ?? "analysis",
+    pageUrl: report.pageUrl ?? report.pageData?.url ?? "",
+    pageTitle: report.pageTitle ?? report.pageData?.title ?? "Untitled page",
+    pageData: report.pageData ?? {
+      url: "",
+      title: "Untitled page",
+      headings: [],
+      buttons: [],
+      inputs: [],
+      links: [],
+      forms: [],
+      visibleTextSummary: "",
+      domStructure: [],
+    },
+    createdAt: timestamp,
+    updatedAt: report.updatedAt ?? timestamp,
   };
 }
 
@@ -4546,4 +4574,44 @@ export async function updateWorkspaceRolePermissions(
   });
   await writeDb(db);
   return permission;
+}
+
+export async function saveExtensionReport(input: {
+  userId?: string;
+  workspaceId?: string;
+  type: ExtensionReportType;
+  pageData: ExtensionPageData;
+  output: unknown;
+}) {
+  const db = await readDb();
+  const workspaceId = input.workspaceId
+    ?? db.workspaceMembers.find((member) => member.userId === (input.userId ?? defaultUserId) && member.status === "Active")?.workspaceId
+    ?? defaultWorkspaceId;
+  const timestamp = now();
+  const report: ExtensionReport = {
+    id: createId("extension_report"),
+    workspaceId,
+    userId: input.userId ?? defaultUserId,
+    type: input.type,
+    pageUrl: input.pageData.url,
+    pageTitle: input.pageData.title || "Untitled page",
+    pageData: input.pageData,
+    output: input.output,
+    createdAt: timestamp,
+    updatedAt: timestamp,
+  };
+  db.extensionReports.unshift(report);
+  db.extensionReports = db.extensionReports.slice(0, 500);
+  await writeDb(db);
+  return report;
+}
+
+export async function listExtensionReports(userId?: string) {
+  const db = await readDb();
+  const workspaceId =
+    db.workspaceMembers.find((member) => member.userId === (userId ?? defaultUserId) && member.status === "Active")?.workspaceId
+    ?? defaultWorkspaceId;
+  return db.extensionReports
+    .filter((report) => !workspaceId || report.workspaceId === workspaceId || report.userId === userId)
+    .sort((a, b) => b.createdAt.localeCompare(a.createdAt));
 }
