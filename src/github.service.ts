@@ -899,6 +899,8 @@ export async function listWorkflowRuns(
       html_url: string;
       status: "queued" | "in_progress" | "completed" | string;
       conclusion: "success" | "failure" | "cancelled" | "skipped" | "timed_out" | "action_required" | null | string;
+      head_branch?: string;
+      head_sha?: string;
       run_started_at?: string;
       created_at: string;
       updated_at: string;
@@ -915,6 +917,8 @@ export async function getWorkflowRun(config: GitHubAutomationConfig, runId: numb
     html_url: string;
     status: "queued" | "in_progress" | "completed" | string;
     conclusion: "success" | "failure" | "cancelled" | "skipped" | "timed_out" | "action_required" | null | string;
+    head_branch?: string;
+    head_sha?: string;
     run_started_at?: string;
     created_at: string;
     updated_at: string;

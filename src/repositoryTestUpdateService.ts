@@ -237,14 +237,14 @@ export async function validateRepositoryTestUpdatesWithGitHubActions(input: {
       logs: "No approved or edited Playwright updates were available for GitHub Actions validation.",
       stdout: "",
       stderr: "",
-      validationDebugLogs: [await buildManualDebugStep({
+      validationDebugLogs: [buildGitHubActionsDebugStep({
         stepName: "Approved update check",
-        cwd: process.cwd(),
         command: "Validate approved generated test updates",
         status: "Failed",
         stdout: "",
         stderr: "No approved or edited Playwright updates were available for GitHub Actions validation.",
         exitCode: 1,
+        branch: "",
       })],
       failedTestNames: [],
       failedTests: [],
@@ -260,14 +260,14 @@ export async function validateRepositoryTestUpdatesWithGitHubActions(input: {
 
   const workflowExists = await fileExists(input.automationConfig, PLAYWRIGHT_VALIDATION_WORKFLOW);
   const debugLogs: ValidationDebugStep[] = [
-    await buildManualDebugStep({
+    buildGitHubActionsDebugStep({
       stepName: "Verify GitHub Actions workflow",
-      cwd: process.cwd(),
       command: `GitHub API: check ${PLAYWRIGHT_VALIDATION_WORKFLOW}`,
       status: workflowExists ? "Passed" : "Failed",
       stdout: workflowExists ? "Workflow file found." : "",
       stderr: workflowExists ? "" : `GitHub Actions workflow not found at ${PLAYWRIGHT_VALIDATION_WORKFLOW}.`,
       exitCode: workflowExists ? 0 : 1,
+      branch: input.automationConfig.defaultBranch,
     }),
   ];
   if (!workflowExists) {
@@ -278,14 +278,14 @@ export async function validateRepositoryTestUpdatesWithGitHubActions(input: {
 
   const branchName = `aiqa/validation-${uniqueSuffix()}`;
   await createBranch(input.automationConfig, branchName);
-  debugLogs.push(await buildManualDebugStep({
+  debugLogs.push(buildGitHubActionsDebugStep({
     stepName: "Create validation branch",
-    cwd: process.cwd(),
     command: `GitHub API: create branch ${branchName}`,
     status: "Passed",
     stdout: `Created validation branch ${branchName}.`,
     stderr: "",
     exitCode: 0,
+    branch: branchName,
   }));
 
   for (const update of approved) {
@@ -296,14 +296,14 @@ export async function validateRepositoryTestUpdatesWithGitHubActions(input: {
       message: `AI QA Copilot: validate ${update.testFilePath}`,
     });
   }
-  debugLogs.push(await buildManualDebugStep({
+  debugLogs.push(buildGitHubActionsDebugStep({
     stepName: "Apply approved generated test updates",
-    cwd: process.cwd(),
     command: `GitHub API: create or update ${approved.length} test file(s)`,
     status: "Passed",
     stdout: approved.map((update) => update.testFilePath).join("\n"),
     stderr: "",
     exitCode: 0,
+    branch: branchName,
   }));
 
   const testFiles = approved.map((update) => update.testFilePath).join(",");
@@ -317,14 +317,14 @@ export async function validateRepositoryTestUpdatesWithGitHubActions(input: {
       browser: validationBrowser,
     },
   });
-  debugLogs.push(await buildManualDebugStep({
+  debugLogs.push(buildGitHubActionsDebugStep({
     stepName: "Trigger GitHub Actions validation",
-    cwd: process.cwd(),
     command: `workflow_dispatch ${PLAYWRIGHT_VALIDATION_WORKFLOW}`,
     status: "Passed",
     stdout: `Triggered workflow for branch ${branchName}. Browser: ${validationBrowser}. Test files: ${testFiles || "all"}`,
     stderr: "",
     exitCode: 0,
+    branch: branchName,
   }));
 
   const workflowRun = await waitForWorkflowRun(input.automationConfig, branchName);
@@ -332,14 +332,11 @@ export async function validateRepositoryTestUpdatesWithGitHubActions(input: {
   const jobs = await listWorkflowRunJobs(input.automationConfig, completedRun.id).catch(() => ({ jobs: [] }));
   const logs = summarizeWorkflowJobs(jobs.jobs);
   const validationStageTimings = buildWorkflowStageTimings(jobs.jobs);
-  debugLogs.push(await buildManualDebugStep({
-    stepName: "Poll GitHub Actions result",
-    cwd: process.cwd(),
-    command: `GitHub API: poll workflow run ${completedRun.id}`,
-    status: completedRun.conclusion === "success" ? "Passed" : completedRun.conclusion === "skipped" ? "Skipped" : "Failed",
-    stdout: logs,
-    stderr: completedRun.conclusion === "success" ? "" : `Workflow concluded with ${completedRun.conclusion ?? "unknown"}.`,
-    exitCode: completedRun.conclusion === "success" ? 0 : 1,
+  debugLogs.push(...buildGitHubActionsDebugLogs({
+    run: completedRun,
+    jobs: jobs.jobs,
+    branchName,
+    logs,
   }));
   const failedTests = jobs.jobs
     .filter((job) => job.conclusion && job.conclusion !== "success" && job.conclusion !== "skipped")
@@ -355,12 +352,14 @@ export async function validateRepositoryTestUpdatesWithGitHubActions(input: {
   const passed = conclusion === "success" ? approved.length : 0;
   const skipped = conclusion === "skipped" ? approved.length : 0;
   const failed = conclusion === "success" || conclusion === "skipped" ? 0 : Math.max(1, failedTests.length || approved.length);
+  const validationStatus = mapWorkflowConclusionToRunStatus(conclusion);
+  const failedStepLogs = summarizeFailedWorkflowSteps(jobs.jobs);
 
   return {
     workspaceId: input.impactAnalysis.workspaceId,
     projectId: input.impactAnalysis.projectId,
     impactAnalysisId: input.impactAnalysis.id,
-    status: conclusion === "success" ? "Passed" : "Failed",
+    status: validationStatus,
     totalTests: Math.max(approved.length, passed + failed + skipped),
     passed,
     failed,
@@ -371,12 +370,12 @@ export async function validateRepositoryTestUpdatesWithGitHubActions(input: {
     command: `workflow_dispatch ${PLAYWRIGHT_VALIDATION_WORKFLOW} on ${branchName}`,
     logs,
     stdout: logs,
-    stderr: conclusion === "success" ? "" : `Workflow concluded with ${conclusion}.`,
+    stderr: conclusion === "success" ? "" : failedStepLogs || `Workflow concluded with ${conclusion}.`,
     validationDebugLogs: debugLogs,
     validationStageTimings,
     failedTestNames: failedTests.map((test) => test.testName),
     failedTests,
-    errorDetails: conclusion === "success" ? undefined : `GitHub Actions validation workflow concluded with ${conclusion}.`,
+    errorDetails: conclusion === "success" ? undefined : failedStepLogs || `GitHub Actions validation workflow concluded with ${conclusion}.`,
     failureExplanation: conclusion === "success"
       ? undefined
       : "GitHub Actions ran the approved Playwright updates and reported a non-success conclusion. Review workflow logs before creating a pull request.",
@@ -388,7 +387,9 @@ export async function validateRepositoryTestUpdatesWithGitHubActions(input: {
     validationBranchName: branchName,
     workflowRunId: completedRun.id,
     workflowRunUrl: completedRun.html_url,
+    workflowStatus: completedRun.status,
     workflowConclusion: conclusion,
+    workflowCommitSha: completedRun.head_sha,
     createdBy: input.createdBy,
     completedAt: new Date().toISOString(),
   };
@@ -802,6 +803,7 @@ function runCommand(
         stepName,
         status: exitCode === 0 ? "Passed" : "Failed",
         command: beforeDebug.snapshot.commandLine,
+        validationProvider: "local-runner",
         workingDirectory: beforeDebug.snapshot.cwd,
         repositoryPath: beforeDebug.snapshot.cwd,
         packageJsonExists: beforeDebug.snapshot.packageJsonExists,
@@ -855,6 +857,7 @@ function runCommand(
           stepName,
           status: "Failed",
           command: `${command} ${args.join(" ")}`.trim(),
+          validationProvider: "local-runner",
           workingDirectory: cwd,
           repositoryPath: cwd,
           packageJsonExists: false,
@@ -930,6 +933,7 @@ async function buildManualDebugStep(input: {
     stepName: input.stepName,
     status: input.status,
     command: input.command,
+    validationProvider: "local-runner",
     workingDirectory: input.cwd,
     repositoryPath: input.cwd,
     packageJsonExists,
@@ -1292,6 +1296,155 @@ function delay(ms: number) {
 function durationBetween(start?: string | null, end?: string | null) {
   if (!start || !end) return 0;
   return Math.max(0, new Date(end).getTime() - new Date(start).getTime());
+}
+
+function mapWorkflowConclusionToRunStatus(conclusion: string): RepositoryValidationRun["status"] {
+  if (conclusion === "success") return "Passed";
+  if (conclusion === "cancelled") return "Cancelled";
+  if (conclusion === "skipped") return "Completed";
+  if (conclusion === "failure" || conclusion === "timed_out" || conclusion === "action_required") return "Failed";
+  return "Failed";
+}
+
+function mapWorkflowStepStatus(conclusion?: string | null, status?: string): ValidationDebugStep["status"] {
+  if (conclusion === "success") return "Passed";
+  if (conclusion === "skipped") return "Skipped";
+  if (conclusion === "failure" || conclusion === "cancelled" || conclusion === "timed_out" || conclusion === "action_required") return "Failed";
+  if (status === "completed") return "Passed";
+  return "Failed";
+}
+
+function buildGitHubActionsDebugStep(input: {
+  stepName: string;
+  command: string;
+  status: ValidationDebugStep["status"];
+  stdout: string;
+  stderr: string;
+  exitCode: number;
+  workflowRunId?: number;
+  workflowUrl?: string;
+  workflowStatus?: string;
+  workflowConclusion?: string | null;
+  branch?: string;
+  commitSha?: string;
+  jobName?: string;
+  jobUrl?: string;
+  startedAt?: string | null;
+  completedAt?: string | null;
+}): ValidationDebugStep {
+  return {
+    stepName: input.stepName,
+    status: input.status,
+    command: input.command,
+    validationProvider: "github-actions",
+    workflowRunId: input.workflowRunId,
+    workflowUrl: input.workflowUrl,
+    workflowStatus: input.workflowStatus,
+    workflowConclusion: input.workflowConclusion,
+    branch: input.branch,
+    commitSha: input.commitSha,
+    jobName: input.jobName,
+    jobUrl: input.jobUrl,
+    startedAt: input.startedAt ?? undefined,
+    completedAt: input.completedAt ?? undefined,
+    exitCode: input.exitCode,
+    stdout: input.stdout,
+    stderr: input.stderr,
+  };
+}
+
+function buildGitHubActionsDebugLogs(input: {
+  run: Awaited<ReturnType<typeof getWorkflowRun>>;
+  jobs: Awaited<ReturnType<typeof listWorkflowRunJobs>>["jobs"];
+  branchName: string;
+  logs: string;
+}): ValidationDebugStep[] {
+  const runStatus = mapWorkflowStepStatus(input.run.conclusion, input.run.status);
+  const steps: ValidationDebugStep[] = [
+    buildGitHubActionsDebugStep({
+      stepName: "GitHub Actions workflow result",
+      command: `GitHub API: actions/runs/${input.run.id}`,
+      status: runStatus,
+      stdout: input.logs,
+      stderr: input.run.conclusion === "success" ? "" : `Workflow concluded with ${input.run.conclusion ?? "unknown"}.`,
+      exitCode: input.run.conclusion === "success" ? 0 : 1,
+      workflowRunId: input.run.id,
+      workflowUrl: input.run.html_url,
+      workflowStatus: input.run.status,
+      workflowConclusion: input.run.conclusion,
+      branch: input.run.head_branch ?? input.branchName,
+      commitSha: input.run.head_sha,
+      startedAt: input.run.run_started_at ?? input.run.created_at,
+      completedAt: input.run.updated_at,
+    }),
+  ];
+
+  for (const job of input.jobs) {
+    if (job.steps?.length) {
+      for (const step of job.steps) {
+        const status = mapWorkflowStepStatus(step.conclusion, step.status);
+        const failed = status === "Failed";
+        steps.push(buildGitHubActionsDebugStep({
+          stepName: step.name,
+          command: `GitHub Actions step #${step.number}`,
+          status,
+          stdout: [
+            `Job: ${job.name}`,
+            `Step: ${step.name}`,
+            `Status: ${step.status}`,
+            `Conclusion: ${step.conclusion ?? "pending"}`,
+            `Workflow URL: ${job.html_url}`,
+          ].join("\n"),
+          stderr: failed ? `Step failed in GitHub Actions. Open the workflow URL for full logs: ${job.html_url}` : "",
+          exitCode: failed ? 1 : 0,
+          workflowRunId: input.run.id,
+          workflowUrl: input.run.html_url,
+          workflowStatus: input.run.status,
+          workflowConclusion: input.run.conclusion,
+          branch: input.run.head_branch ?? input.branchName,
+          commitSha: input.run.head_sha,
+          jobName: job.name,
+          jobUrl: job.html_url,
+          startedAt: step.started_at,
+          completedAt: step.completed_at,
+        }));
+      }
+      continue;
+    }
+
+    const status = mapWorkflowStepStatus(job.conclusion, job.status);
+    steps.push(buildGitHubActionsDebugStep({
+      stepName: job.name,
+      command: "GitHub Actions job",
+      status,
+      stdout: `Job: ${job.name}\nStatus: ${job.status}\nConclusion: ${job.conclusion ?? "pending"}\nURL: ${job.html_url}`,
+      stderr: status === "Failed" ? `Job failed in GitHub Actions. Open the workflow URL for full logs: ${job.html_url}` : "",
+      exitCode: status === "Failed" ? 1 : 0,
+      workflowRunId: input.run.id,
+      workflowUrl: input.run.html_url,
+      workflowStatus: input.run.status,
+      workflowConclusion: input.run.conclusion,
+      branch: input.run.head_branch ?? input.branchName,
+      commitSha: input.run.head_sha,
+      jobName: job.name,
+      jobUrl: job.html_url,
+      startedAt: job.started_at,
+      completedAt: job.completed_at,
+    }));
+  }
+
+  return steps;
+}
+
+function summarizeFailedWorkflowSteps(jobs: Awaited<ReturnType<typeof listWorkflowRunJobs>>["jobs"]) {
+  const failedSteps = jobs.flatMap((job) => (job.steps ?? [])
+    .filter((step) => mapWorkflowStepStatus(step.conclusion, step.status) === "Failed")
+    .map((step) => `Job "${job.name}" step "${step.name}" failed with conclusion "${step.conclusion ?? step.status}". Logs: ${job.html_url}`));
+  if (failedSteps.length) return failedSteps.join("\n");
+  const failedJobs = jobs
+    .filter((job) => mapWorkflowStepStatus(job.conclusion, job.status) === "Failed")
+    .map((job) => `Job "${job.name}" failed with conclusion "${job.conclusion ?? job.status}". Logs: ${job.html_url}`);
+  return failedJobs.join("\n");
 }
 
 function summarizeWorkflowJobs(jobs: Awaited<ReturnType<typeof listWorkflowRunJobs>>["jobs"]) {
