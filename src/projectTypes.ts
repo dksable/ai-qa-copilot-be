@@ -586,6 +586,34 @@ export interface RepositoryGeneratedTestUpdate {
   status: RepositoryGeneratedTestUpdateStatus;
   aiProvider: string;
   aiModel: string;
+  repositoryMatchScore?: number;
+  locatorConfidence?: number;
+  assertionConfidence?: number;
+  businessCoverageScore?: number;
+  maintainabilityScore?: number;
+  estimatedStabilityScore?: number;
+  repositoryContextSummary?: {
+    framework?: string;
+    language?: string;
+    pattern?: string;
+    usesPageObjectModel?: boolean;
+    usesFixtures?: boolean;
+    locatorStrategy?: string;
+    assertionStyle?: string;
+    testFolderPath?: string;
+    pageObjectFolderPath?: string;
+    playwrightVersion?: string;
+  };
+  qualityReport?: {
+    repositoryStyleMatch: number;
+    businessCoverage: number;
+    locatorQuality: number;
+    assertionQuality: number;
+    maintainabilityScore: number;
+    estimatedExecutionStability: number;
+    potentialRisks: string[];
+    recommendations: string[];
+  };
   createdBy?: string;
   createdAt: string;
   updatedAt: string;

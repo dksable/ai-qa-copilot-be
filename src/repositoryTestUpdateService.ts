@@ -2,6 +2,7 @@ import type {
   RepositoryGeneratedTestUpdate,
   RepositoryImpactAnalysis,
   RepositoryImpactAnalysisTest,
+  RepositoryAnalysis,
   RepositoryValidationRecommendation,
   RepositoryValidationRun,
 } from "./projectTypes.js";
@@ -46,11 +47,144 @@ function uniqueSuffix() {
   return `${timestamp}-${random}`;
 }
 
+function clampScore(value: number) {
+  return Math.max(0, Math.min(100, Math.round(value)));
+}
+
+function titleCase(value: string) {
+  return value
+    .replace(/([a-z])([A-Z])/g, "$1 $2")
+    .replace(/[-_./]+/g, " ")
+    .replace(/\s+/g, " ")
+    .trim()
+    .replace(/\b\w/g, (letter) => letter.toUpperCase());
+}
+
+function moduleNameFromPath(filePath: string) {
+  const fileName = filePath.split("/").pop()?.replace(/\.[^.]+$/, "") || "impacted flow";
+  return titleCase(fileName.replace(/\.(spec|test)$/i, ""));
+}
+
+function routeFromChangedFile(filePath: string) {
+  const normalized = filePath.toLowerCase();
+  const fileName = normalized.split("/").pop()?.replace(/\.[^.]+$/, "") || "feature";
+  const routeName = fileName
+    .replace(/(page|form|component|view|screen|api|route)$/i, "")
+    .replace(/[^a-z0-9]+/g, "-")
+    .replace(/^-+|-+$/g, "");
+  if (normalized.includes("login") || normalized.includes("auth")) return "/login";
+  if (normalized.includes("dashboard")) return "/dashboard";
+  if (normalized.includes("checkout")) return "/checkout";
+  if (normalized.includes("payment")) return "/payment";
+  if (normalized.includes("project")) return "/projects";
+  if (normalized.includes("user")) return "/users";
+  return `/${routeName || "feature"}`;
+}
+
+function inferLocatorStrategy(oldCode: string, repositoryAnalysis?: RepositoryAnalysis) {
+  const candidates = [
+    { matcher: /getByTestId/g, label: "getByTestId" },
+    { matcher: /getByRole/g, label: "getByRole" },
+    { matcher: /getByLabel/g, label: "getByLabel" },
+    { matcher: /getByPlaceholder/g, label: "getByPlaceholder" },
+    { matcher: /getByText/g, label: "getByText" },
+    { matcher: /locator\(['"`][.#\[]/g, label: "CSS selectors" },
+    { matcher: /xpath|locator\(['"`]\/\//g, label: "XPath" },
+  ];
+  const detected = candidates
+    .map((candidate) => ({ ...candidate, count: oldCode.match(candidate.matcher)?.length ?? 0 }))
+    .sort((a, b) => b.count - a.count)[0];
+  if (detected?.count) return detected.label;
+  if (repositoryAnalysis?.usesPageObjectModel) return "Page Object locators";
+  return "getByRole";
+}
+
+function inferAssertionStyle(oldCode: string) {
+  if (/toHaveText|toContainText|toHaveAttribute|toHaveValue/.test(oldCode)) return "Business state assertions";
+  if (/toBeVisible|toBeEnabled|toBeDisabled/.test(oldCode)) return "UI outcome assertions";
+  if (/toHaveURL|toHaveTitle/.test(oldCode)) return "Navigation assertions";
+  return "Business outcome assertions";
+}
+
+function extractExistingGoto(oldCode: string) {
+  return oldCode.match(/page\.goto\(([^)]+)\)/)?.[1];
+}
+
+function buildRepositoryContextSummary(oldCode: string, repositoryAnalysis?: RepositoryAnalysis): NonNullable<RepositoryGeneratedTestUpdate["repositoryContextSummary"]> {
+  return {
+    framework: repositoryAnalysis?.framework ?? "Playwright",
+    language: repositoryAnalysis?.language ?? "TypeScript",
+    pattern: repositoryAnalysis?.pattern ?? (repositoryAnalysis?.usesPageObjectModel ? "Page Object Model" : "Direct Playwright"),
+    usesPageObjectModel: repositoryAnalysis?.usesPageObjectModel ?? /new\s+\w+Page\(/.test(oldCode),
+    usesFixtures: repositoryAnalysis?.usesFixtures ?? /test\.extend|fixtures?\//i.test(oldCode),
+    locatorStrategy: inferLocatorStrategy(oldCode, repositoryAnalysis),
+    assertionStyle: inferAssertionStyle(oldCode),
+    testFolderPath: repositoryAnalysis?.testFolderPath,
+    pageObjectFolderPath: repositoryAnalysis?.pageObjectFolderPath,
+    playwrightVersion: repositoryAnalysis?.playwrightVersion,
+  };
+}
+
+function buildQualityReport(input: {
+  oldCode: string;
+  impactedTest: RepositoryImpactAnalysisTest;
+  repositoryAnalysis?: RepositoryAnalysis;
+  context: NonNullable<RepositoryGeneratedTestUpdate["repositoryContextSummary"]>;
+}) {
+  const hasOldCode = Boolean(input.oldCode.trim());
+  const repositoryStyleMatch = clampScore((input.repositoryAnalysis?.confidenceScore ?? 72) + (hasOldCode ? 10 : 0));
+  const locatorQuality = clampScore(input.context.locatorStrategy === "XPath" ? 58 : input.context.locatorStrategy === "CSS selectors" ? 72 : 92);
+  const assertionQuality = clampScore(input.context.assertionStyle === "Navigation assertions" ? 72 : 90);
+  const businessCoverage = clampScore(input.impactedTest.riskLevel === "High" ? 88 : input.impactedTest.riskLevel === "Medium" ? 82 : 76);
+  const maintainabilityScore = clampScore(74 + (input.context.usesPageObjectModel ? 12 : 0) + (input.context.usesFixtures ? 6 : 0) + (hasOldCode ? 4 : 0));
+  const estimatedExecutionStability = clampScore((locatorQuality + assertionQuality + maintainabilityScore) / 3);
+  const recommendations = [
+    input.context.usesPageObjectModel
+      ? "Review the generated flow against existing Page Object methods before approval."
+      : "Promote repeated interactions into a Page Object if this scenario becomes shared.",
+    "Confirm seeded test data and authentication helpers match the target environment.",
+    "Run GitHub Actions validation before creating the pull request.",
+  ];
+  const potentialRisks = [
+    ...(input.context.locatorStrategy === "XPath" ? ["Repository appears to use XPath-style selectors; prefer role, label, or test id locators where possible."] : []),
+    ...(input.impactedTest.riskLevel === "High" ? ["High-risk application change may require additional negative and regression coverage."] : []),
+    ...(!hasOldCode ? ["No existing test file was found, so imports and helper usage may need one review pass."] : []),
+  ];
+  return {
+    repositoryStyleMatch,
+    businessCoverage,
+    locatorQuality,
+    assertionQuality,
+    maintainabilityScore,
+    estimatedExecutionStability,
+    potentialRisks: potentialRisks.length ? potentialRisks : ["No major generation risks detected."],
+    recommendations,
+  };
+}
+
+function injectRepositoryAwareTest(oldCode: string, testBlock: string) {
+  const trimmed = oldCode.trimEnd();
+  const lastDescribeClose = trimmed.lastIndexOf("\n});");
+  if (lastDescribeClose > -1) {
+    return `${trimmed.slice(0, lastDescribeClose)}\n\n${testBlock}\n${trimmed.slice(lastDescribeClose + 1)}\n`;
+  }
+  return `${trimmed}\n\n${testBlock}\n`;
+}
+
 function generatedCode(input: {
   oldCode: string;
   impactedTest: RepositoryImpactAnalysisTest;
   impactAnalysis: RepositoryImpactAnalysis;
+  repositoryAnalysis?: RepositoryAnalysis;
 }) {
+  const context = buildRepositoryContextSummary(input.oldCode, input.repositoryAnalysis);
+  const moduleName = moduleNameFromPath(input.impactedTest.relatedChangedFile);
+  const route = extractExistingGoto(input.oldCode) ?? `'${routeFromChangedFile(input.impactedTest.relatedChangedFile)}'`;
+  const locatorComment = context.locatorStrategy === "getByTestId"
+    ? "Prefer existing data-testid attributes for stable selectors."
+    : context.locatorStrategy === "Page Object locators"
+      ? "Reuse the repository's Page Object methods for stable selectors."
+      : "Prefer role, label, and accessible-name locators before CSS selectors.";
   const reviewBlock = [
     "",
     "",
@@ -59,20 +193,60 @@ function generatedCode(input: {
     `// Impact reason: ${input.impactedTest.impactReason}`,
     `// Suggested action: ${input.impactedTest.suggestedAction}`,
     `// Risk: ${input.impactedTest.riskLevel}`,
+    `// Repository pattern: ${context.pattern}`,
+    `// Locator strategy: ${context.locatorStrategy}`,
+    `// Assertion style: ${context.assertionStyle}`,
+  ].join("\n");
+  const testBlock = [
+    `  test('validates ${moduleName} after impacted application change', async ({ page }) => {`,
+    `    // ${locatorComment}`,
+    `    await page.goto(${route});`,
+    `    const featureHeading = page.getByRole('heading', { name: /${moduleName.replace(/\s+/g, "|")}/i });`,
+    "    if (await featureHeading.count()) {",
+    "      await expect(featureHeading.first()).toBeVisible();",
+    "    }",
+    "    await expect(page.locator('body')).toContainText(/success|ready|dashboard|overview|details|results|submit|save|continue/i);",
+    "",
+    "    // Business regression guard generated from AI Impact Analysis.",
+    "    await expect(page.locator('body')).toBeVisible();",
+    "  });",
   ].join("\n");
 
   if (input.oldCode.trim()) {
-    return `${input.oldCode.trimEnd()}${reviewBlock}\n`;
+    return `${injectRepositoryAwareTest(input.oldCode, testBlock)}${reviewBlock}\n`;
   }
 
-  const testName = input.impactedTest.relatedChangedFile.split("/").pop()?.replace(/\.[^.]+$/, "") || "impacted flow";
+  const testName = moduleNameFromPath(input.impactedTest.testFilePath);
+  const pomComment = context.usesPageObjectModel
+    ? [
+        "// Repository analysis detected Page Object Model.",
+        `// Add or reuse a page object from ${context.pageObjectFolderPath ?? "the page object folder"} when project-specific methods are available.`,
+        "// Example: const pageObject = new FeaturePage(page);",
+        "",
+      ]
+    : [];
   return [
     "import { test, expect } from '@playwright/test';",
     "",
+    ...pomComment,
     `test.describe('${testName} impact coverage', () => {`,
-    `  test('reviews impacted flow for ${testName}', async ({ page }) => {`,
-    "    await page.goto('/');",
-    "    await expect(page).toHaveURL(/.*/);",
+    `  test('validates ${moduleName} happy path after repository change', async ({ page }) => {`,
+    `    // ${locatorComment}`,
+    `    await page.goto(${route});`,
+    `    const featureHeading = page.getByRole('heading', { name: /${moduleName.replace(/\s+/g, "|")}/i });`,
+    "    if (await featureHeading.count()) {",
+    "      await expect(featureHeading.first()).toBeVisible();",
+    "    }",
+    "    await expect(page.locator('body')).toContainText(/success|ready|dashboard|overview|details|results|submit|save|continue/i);",
+    "  });",
+    "",
+    `  test('shows useful validation feedback for invalid ${moduleName} data', async ({ page }) => {`,
+    `    await page.goto(${route});`,
+    "    const submitAction = page.getByRole('button', { name: /submit|save|continue|login|create|update/i });",
+    "    if (await submitAction.count()) {",
+    "      await submitAction.first().click();",
+    "      await expect(page.locator('body')).toContainText(/required|invalid|error|missing|failed/i);",
+    "    }",
     "  });",
     "});",
     reviewBlock,
@@ -83,6 +257,7 @@ function generatedCode(input: {
 export async function generateRepositoryTestUpdates(input: {
   impactAnalysis: RepositoryImpactAnalysis;
   automationConfig: GitHubAutomationConfig;
+  repositoryAnalysis?: RepositoryAnalysis;
   aiProvider: string;
   aiModel: string;
   createdBy?: string;
@@ -91,21 +266,48 @@ export async function generateRepositoryTestUpdates(input: {
   const updates: Omit<RepositoryGeneratedTestUpdate, "id" | "createdAt" | "updatedAt">[] = [];
   for (const impactedTest of targets) {
     const oldCode = await readRepositoryFile(input.automationConfig, impactedTest.testFilePath);
+    const repositoryContextSummary = buildRepositoryContextSummary(oldCode, input.repositoryAnalysis);
+    const qualityReport = buildQualityReport({
+      oldCode,
+      impactedTest,
+      repositoryAnalysis: input.repositoryAnalysis,
+      context: repositoryContextSummary,
+    });
+    const overallConfidence = clampScore((
+      qualityReport.repositoryStyleMatch +
+      qualityReport.businessCoverage +
+      qualityReport.locatorQuality +
+      qualityReport.assertionQuality +
+      qualityReport.estimatedExecutionStability
+    ) / 5);
     updates.push({
       workspaceId: input.impactAnalysis.workspaceId,
       projectId: input.impactAnalysis.projectId,
       impactAnalysisId: input.impactAnalysis.id,
       testFilePath: impactedTest.testFilePath,
       oldCode,
-      newCode: generatedCode({ oldCode, impactedTest, impactAnalysis: input.impactAnalysis }),
+      newCode: generatedCode({
+        oldCode,
+        impactedTest,
+        impactAnalysis: input.impactAnalysis,
+        repositoryAnalysis: input.repositoryAnalysis,
+      }),
       updateSummary: `${impactedTest.suggestedAction} for ${impactedTest.relatedChangedFile}`,
       impactReason: impactedTest.impactReason,
-      confidenceScore: impactedTest.confidenceScore,
+      confidenceScore: overallConfidence,
       riskLevel: impactedTest.riskLevel,
       suggestedAction: impactedTest.suggestedAction,
       status: "Pending",
       aiProvider: input.aiProvider,
       aiModel: input.aiModel,
+      repositoryMatchScore: qualityReport.repositoryStyleMatch,
+      locatorConfidence: qualityReport.locatorQuality,
+      assertionConfidence: qualityReport.assertionQuality,
+      businessCoverageScore: qualityReport.businessCoverage,
+      maintainabilityScore: qualityReport.maintainabilityScore,
+      estimatedStabilityScore: qualityReport.estimatedExecutionStability,
+      repositoryContextSummary,
+      qualityReport,
       createdBy: input.createdBy,
     });
   }

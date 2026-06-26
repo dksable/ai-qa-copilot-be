@@ -717,9 +717,11 @@ integrationRouter.post("/integrations/github/impact-analysis/:impactAnalysisId/g
     return;
   }
   const provider = await resolveAIProviderForFeature(analysis.workspaceId, "repository-test-update");
+  const repositoryAnalysis = await getRepositoryAnalysis(analysis.workspaceId);
   const updates = await generateRepositoryTestUpdates({
     impactAnalysis: analysis,
     automationConfig: toGitHubConfig(runtimeConfig),
+    repositoryAnalysis: repositoryAnalysis ?? undefined,
     aiProvider: provider?.providerName ?? "AI QA Copilot Default AI",
     aiModel: provider?.modelName ?? process.env.GROQ_MODEL ?? "llama-3.3-70b-versatile",
     createdBy: request.userId,
