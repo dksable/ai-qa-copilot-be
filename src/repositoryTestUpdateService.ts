@@ -117,6 +117,8 @@ export async function validateRepositoryTestUpdates(input: {
   updates: RepositoryGeneratedTestUpdate[];
   automationConfig: GitHubAutomationConfig;
   createdBy?: string;
+  validationMode?: RepositoryValidationRun["validationMode"];
+  browser?: string;
 }): Promise<Omit<RepositoryValidationRun, "id" | "createdAt">> {
   const started = Date.now();
   const approved = input.updates.filter((update) => update.status === "Approved" || update.status === "Edited");
@@ -217,6 +219,8 @@ export async function validateRepositoryTestUpdatesWithGitHubActions(input: {
   updates: RepositoryGeneratedTestUpdate[];
   automationConfig: GitHubAutomationConfig;
   createdBy?: string;
+  validationMode?: RepositoryValidationRun["validationMode"];
+  browser?: string;
 }): Promise<Omit<RepositoryValidationRun, "id" | "createdAt">> {
   const started = Date.now();
   const approved = input.updates.filter((update) => update.status === "Approved" || update.status === "Edited");
@@ -233,6 +237,7 @@ export async function validateRepositoryTestUpdatesWithGitHubActions(input: {
       duration: Date.now() - started,
       browser: "GitHub Actions",
       environment: "github-actions",
+      validationMode: input.validationMode ?? "quick",
       command: "workflow_dispatch",
       logs: "No approved or edited Playwright updates were available for GitHub Actions validation.",
       stdout: "",
@@ -306,22 +311,31 @@ export async function validateRepositoryTestUpdatesWithGitHubActions(input: {
     branch: branchName,
   }));
 
-  const testFiles = approved.map((update) => update.testFilePath).join(",");
-  const validationBrowser = process.env.AIQA_VALIDATION_BROWSER || "chromium";
+  const validationMode = input.validationMode ?? "quick";
+  const quickFiles = approved.map((update) => update.testFilePath);
+  const impactFiles = Array.from(new Set([
+    ...quickFiles,
+    ...input.impactAnalysis.impactedTests.map((test) => test.testFilePath).filter(Boolean),
+  ]));
+  const selectedFiles = validationMode === "full"
+    ? ""
+    : (validationMode === "impact" ? impactFiles : quickFiles).join(",");
+  const validationBrowser = input.browser || process.env.AIQA_VALIDATION_BROWSER || "chromium";
   await triggerWorkflowDispatch(input.automationConfig, {
     workflowId: "playwright-validation.yml",
     ref: branchName,
     inputs: {
-      test_files: testFiles,
+      test_files: selectedFiles,
       validation_branch: branchName,
       browser: validationBrowser,
+      validation_mode: validationMode,
     },
   });
   debugLogs.push(buildGitHubActionsDebugStep({
     stepName: "Trigger GitHub Actions validation",
     command: `workflow_dispatch ${PLAYWRIGHT_VALIDATION_WORKFLOW}`,
     status: "Passed",
-    stdout: `Triggered workflow for branch ${branchName}. Browser: ${validationBrowser}. Test files: ${testFiles || "all"}`,
+    stdout: `Triggered workflow for branch ${branchName}. Mode: ${validationMode}. Browser: ${validationBrowser}. Test files: ${selectedFiles || "all"}`,
     stderr: "",
     exitCode: 0,
     branch: branchName,
@@ -341,7 +355,7 @@ export async function validateRepositoryTestUpdatesWithGitHubActions(input: {
   const failedTests = jobs.jobs
     .filter((job) => job.conclusion && job.conclusion !== "success" && job.conclusion !== "skipped")
     .map((job) => ({
-      testFile: testFiles || "GitHub Actions workflow",
+      testFile: selectedFiles || "GitHub Actions workflow",
       testName: job.name,
       errorMessage: `GitHub Actions job concluded with ${job.conclusion}. Open the workflow logs for details.`,
       duration: durationBetween(job.started_at, job.completed_at),
@@ -367,7 +381,8 @@ export async function validateRepositoryTestUpdatesWithGitHubActions(input: {
     duration: Date.now() - started,
     browser: "GitHub Actions",
     environment: "github-actions",
-    command: `workflow_dispatch ${PLAYWRIGHT_VALIDATION_WORKFLOW} on ${branchName}`,
+    validationMode,
+    command: `workflow_dispatch ${PLAYWRIGHT_VALIDATION_WORKFLOW} on ${branchName} (${validationMode}, ${validationBrowser})`,
     logs,
     stdout: logs,
     stderr: conclusion === "success" ? "" : failedStepLogs || `Workflow concluded with ${conclusion}.`,
@@ -1466,10 +1481,12 @@ function buildWorkflowStageTimings(jobs: Awaited<ReturnType<typeof listWorkflowR
   const stageFor = (name: string) => {
     const value = name.toLowerCase();
     if (value.includes("checkout")) return "Repository checkout";
-    if (value.includes("setup node") || value.includes("restore node") || value.includes("npm cache")) return "Cache restore";
+    if (value.includes("detect package manager")) return "Package manager detection";
+    if (value.includes("setup node") || value.includes("restore node") || value.includes("npm cache")) return "Dependency cache restore";
     if (value.includes("install dependencies")) return "Dependency install";
     if (value.includes("playwright browser") || value.includes("browser install")) return "Browser install";
     if (value.includes("run playwright")) return "Test execution";
+    if (value.includes("summary")) return "GitHub summary";
     if (value.includes("upload")) return "Artifact upload";
     return name;
   };

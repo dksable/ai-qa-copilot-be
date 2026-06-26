@@ -80,6 +80,7 @@ export type RepositoryImpactSuggestionCategory =
   | "UI";
 export type RepositoryGeneratedTestUpdateStatus = "Pending" | "Approved" | "Rejected" | "Edited";
 export type RepositoryValidationRunStatus = "Pending" | "Running" | "Passed" | "Failed" | "Cancelled" | "Completed" | "Error";
+export type RepositoryValidationMode = "quick" | "impact" | "full";
 export type RepositoryUpdatePullRequestStatus = "Created" | "Failed";
 export type RepositoryValidationReleaseRecommendation = "Safe to Merge" | "Merge with Caution" | "Do Not Merge";
 export type RepositoryValidationMergeDecision = "Approved" | "Warning" | "Blocked";
@@ -603,6 +604,7 @@ export interface RepositoryValidationRun {
   duration: number;
   browser: string;
   environment: string;
+  validationMode?: RepositoryValidationMode;
   command?: string;
   logs: string;
   stdout?: string;
