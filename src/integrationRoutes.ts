@@ -35,6 +35,7 @@ import {
   getRepositoryImpactAnalysis,
   getRepositoryImpactAnalysisByActivity,
   getRepositoryGeneratedTestUpdate,
+  getRepositoryLearningProfile,
   getRepositoryValidationRun,
   getLatestRepositoryValidationRun,
   getLatestRepositoryValidationRecommendation,
@@ -64,6 +65,9 @@ import {
   saveRepositoryImpactAnalysis,
   saveRepositoryAnalysis,
   saveAutomationRepositoryConfig,
+  addRepositoryLearningFeedback,
+  refreshRepositoryLearningProfile,
+  resetRepositoryLearningProfile,
   updateApplicationRepositoryWebhook,
   updateRepositoryImpactAnalysisStatus,
   updateRepositoryGeneratedTestUpdate,
@@ -243,11 +247,20 @@ function onboardingFileContent(filePath: string, testFolderPath = "tests") {
       "        required: false",
       "        default: 'quick'",
       "",
+      "concurrency:",
+      "  group: aiqa-validation-${{ github.ref }}-${{ github.event.inputs.validation_mode || 'quick' }}",
+      "  cancel-in-progress: true",
+      "",
+      "permissions:",
+      "  contents: read",
+      "  actions: read",
+      "",
       "jobs:",
       "  validate:",
       "    runs-on: ubuntu-latest",
-      "    timeout-minutes: 20",
+      "    timeout-minutes: 10",
       "    env:",
+      "      CI: true",
       "      PLAYWRIGHT_BROWSERS_PATH: ~/.cache/ms-playwright",
       "      VALIDATION_MODE: ${{ github.event.inputs.validation_mode || 'quick' }}",
       "      VALIDATION_BROWSER: ${{ github.event.inputs.browser || 'chromium' }}",
@@ -255,6 +268,8 @@ function onboardingFileContent(filePath: string, testFolderPath = "tests") {
       "    steps:",
       "      - name: Checkout repo",
       "        uses: actions/checkout@v4",
+      "        with:",
+      "          fetch-depth: 1",
       "      - name: Detect package manager",
       "        id: package-manager",
       "        shell: bash",
@@ -280,15 +295,15 @@ function onboardingFileContent(filePath: string, testFolderPath = "tests") {
       "        uses: actions/cache@v4",
       "        with:",
       "          path: node_modules",
-      "          key: ${{ runner.os }}-node-modules-${{ steps.package-manager.outputs.manager }}-${{ hashFiles('package-lock.json', 'npm-shrinkwrap.json', 'pnpm-lock.yaml', 'yarn.lock') }}",
+      "          key: ${{ runner.os }}-node20-node-modules-${{ steps.package-manager.outputs.manager }}-${{ hashFiles('package-lock.json', 'npm-shrinkwrap.json', 'pnpm-lock.yaml', 'yarn.lock') }}",
       "          restore-keys: |",
-      "            ${{ runner.os }}-node-modules-${{ steps.package-manager.outputs.manager }}-",
+      "            ${{ runner.os }}-node20-node-modules-${{ steps.package-manager.outputs.manager }}-",
       "      - name: Restore Playwright browser cache",
       "        id: playwright-cache",
       "        uses: actions/cache@v4",
       "        with:",
       "          path: ~/.cache/ms-playwright",
-      "          key: ${{ runner.os }}-playwright-${{ env.VALIDATION_BROWSER }}-${{ hashFiles('package-lock.json', 'npm-shrinkwrap.json', 'pnpm-lock.yaml', 'yarn.lock') }}",
+      "          key: ${{ runner.os }}-playwright-${{ env.VALIDATION_BROWSER }}-${{ hashFiles('package-lock.json', 'npm-shrinkwrap.json', 'pnpm-lock.yaml', 'yarn.lock') }}-${{ hashFiles('playwright.config.ts', 'playwright.config.js') }}",
       "          restore-keys: |",
       "            ${{ runner.os }}-playwright-${{ env.VALIDATION_BROWSER }}-",
       "      - name: Install dependencies",
@@ -309,6 +324,9 @@ function onboardingFileContent(filePath: string, testFolderPath = "tests") {
       "          else",
       "            npm install --prefer-offline --no-audit --no-fund",
       "          fi",
+      "      - name: Verify Playwright package",
+      "        shell: bash",
+      "        run: node -e \"require.resolve('@playwright/test'); console.log('@playwright/test resolved')\"",
       "      - name: Install Playwright browsers",
       "        if: steps.playwright-cache.outputs.cache-hit != 'true'",
       "        shell: bash",
@@ -365,6 +383,17 @@ function onboardingFileContent(filePath: string, testFolderPath = "tests") {
       "          name: playwright-report",
       "          path: playwright-report/",
       "          if-no-files-found: ignore",
+      "          retention-days: 3",
+      "          compression-level: 1",
+      "      - name: Upload Playwright test artifacts",
+      "        if: failure()",
+      "        uses: actions/upload-artifact@v4",
+      "        with:",
+      "          name: playwright-test-results",
+      "          path: test-results/",
+      "          if-no-files-found: ignore",
+      "          retention-days: 3",
+      "          compression-level: 1",
       "",
     ].join("\n");
   }
@@ -718,10 +747,12 @@ integrationRouter.post("/integrations/github/impact-analysis/:impactAnalysisId/g
   }
   const provider = await resolveAIProviderForFeature(analysis.workspaceId, "repository-test-update");
   const repositoryAnalysis = await getRepositoryAnalysis(analysis.workspaceId);
+  const learningProfile = runtimeConfig.id ? await refreshRepositoryLearningProfile(runtimeConfig.id, request.userId) : null;
   const updates = await generateRepositoryTestUpdates({
     impactAnalysis: analysis,
     automationConfig: toGitHubConfig(runtimeConfig),
     repositoryAnalysis: repositoryAnalysis ?? undefined,
+    learningProfile,
     aiProvider: provider?.providerName ?? "AI QA Copilot Default AI",
     aiModel: provider?.modelName ?? process.env.GROQ_MODEL ?? "llama-3.3-70b-versatile",
     createdBy: request.userId,
@@ -756,6 +787,8 @@ integrationRouter.patch("/integrations/github/test-updates/:updateId/approve", a
     return;
   }
   if (!(await requireWorkspaceRole(request, response, update.workspaceId, ["Owner", "Admin", "QA Lead", "QA Engineer"]))) return;
+  const config = await getAutomationRepositoryConfig(update.workspaceId);
+  if (config?.id) void addRepositoryLearningFeedback(config.id, { action: "Approved", confidenceDelta: 3 }, request.userId);
   response.json(await updateRepositoryGeneratedTestUpdate(update.id, { status: "Approved" }));
 }));
 
@@ -766,6 +799,8 @@ integrationRouter.patch("/integrations/github/test-updates/:updateId/reject", as
     return;
   }
   if (!(await requireWorkspaceRole(request, response, update.workspaceId, ["Owner", "Admin", "QA Lead", "QA Engineer"]))) return;
+  const config = await getAutomationRepositoryConfig(update.workspaceId);
+  if (config?.id) void addRepositoryLearningFeedback(config.id, { action: "Rejected", confidenceDelta: -5 }, request.userId);
   response.json(await updateRepositoryGeneratedTestUpdate(update.id, { status: "Rejected" }));
 }));
 
@@ -777,6 +812,13 @@ integrationRouter.patch("/integrations/github/test-updates/:updateId/edit", asyn
     return;
   }
   if (!(await requireWorkspaceRole(request, response, update.workspaceId, ["Owner", "Admin", "QA Lead", "QA Engineer"]))) return;
+  const config = await getAutomationRepositoryConfig(update.workspaceId);
+  const locatorStrategy = body.newCode.includes("getByTestId")
+    ? "getByTestId"
+    : body.newCode.includes("getByRole")
+      ? "getByRole"
+      : undefined;
+  if (config?.id) void addRepositoryLearningFeedback(config.id, { action: "Edited", locatorStrategy, confidenceDelta: 2 }, request.userId);
   response.json(await updateRepositoryGeneratedTestUpdate(update.id, {
     status: "Edited",
     newCode: body.newCode,
@@ -791,6 +833,8 @@ integrationRouter.post("/integrations/github/test-updates/:updateId/regenerate",
     return;
   }
   if (!(await requireWorkspaceRole(request, response, update.workspaceId, ["Owner", "Admin", "QA Lead", "QA Engineer"]))) return;
+  const config = await getAutomationRepositoryConfig(update.workspaceId);
+  if (config?.id) void addRepositoryLearningFeedback(config.id, { action: "Regenerated", confidenceDelta: -1 }, request.userId);
   const regenerated = `${update.newCode.trimEnd()}\n\n// Regenerated by AI QA Copilot on ${new Date().toISOString()}\n`;
   response.json(await updateRepositoryGeneratedTestUpdate(update.id, {
     status: "Pending",
@@ -855,6 +899,12 @@ integrationRouter.post("/integrations/github/impact-analysis/:impactAnalysisId/r
       });
       const savedRun = await updateRepositoryValidationRun(runningRun.id, run);
       if (!savedRun) return;
+      if (runtimeConfig.id) {
+        void addRepositoryLearningFeedback(runtimeConfig.id, {
+          action: savedRun.status === "Passed" ? "Validation Passed" : "Validation Failed",
+          confidenceDelta: savedRun.status === "Passed" ? 5 : -4,
+        }, request.userId);
+      }
       void generateValidationRecommendation({
         impactAnalysis: analysis,
         validationRun: savedRun,
@@ -1434,6 +1484,90 @@ integrationRouter.get("/integrations/github/analysis", asyncRoute(async (request
   const { workspaceId } = z.object({ workspaceId: z.string().min(1) }).parse(request.query);
   if (!(await requireWorkspaceRole(request, response, workspaceId, ["Owner", "Admin", "QA Lead", "QA Engineer"]))) return;
   response.json(await getRepositoryAnalysis(workspaceId));
+}));
+
+integrationRouter.get("/repositories/:repositoryId/learning", asyncRoute(async (request, response) => {
+  const repositoryId = String(request.params.repositoryId);
+  const profile = await getRepositoryLearningProfile(repositoryId) ?? await refreshRepositoryLearningProfile(repositoryId, request.userId);
+  if (!profile) {
+    response.status(404).json({ message: "Repository learning profile not found." });
+    return;
+  }
+  if (!(await requireWorkspaceRole(request, response, profile.workspaceId, ["Owner", "Admin", "QA Lead", "QA Engineer", "Viewer"]))) return;
+  response.json(profile);
+}));
+
+integrationRouter.post("/repositories/:repositoryId/learning/refresh", asyncRoute(async (request, response) => {
+  const repositoryId = String(request.params.repositoryId);
+  const profile = await refreshRepositoryLearningProfile(repositoryId, request.userId);
+  if (!profile) {
+    response.status(404).json({ message: "Repository learning profile not found." });
+    return;
+  }
+  if (!(await requireWorkspaceRole(request, response, profile.workspaceId, ["Owner", "Admin", "QA Lead", "QA Engineer"]))) return;
+  response.json(profile);
+}));
+
+integrationRouter.get("/repositories/:repositoryId/learning/patterns", asyncRoute(async (request, response) => {
+  const repositoryId = String(request.params.repositoryId);
+  const profile = await getRepositoryLearningProfile(repositoryId) ?? await refreshRepositoryLearningProfile(repositoryId, request.userId);
+  if (!profile) {
+    response.status(404).json({ message: "Repository learning profile not found." });
+    return;
+  }
+  if (!(await requireWorkspaceRole(request, response, profile.workspaceId, ["Owner", "Admin", "QA Lead", "QA Engineer", "Viewer"]))) return;
+  response.json({
+    locatorPreferences: profile.locatorPreferences,
+    namingPatterns: profile.namingPatterns,
+    testStylePatterns: profile.testStylePatterns,
+    authPatterns: profile.authPatterns,
+    commonFlows: profile.commonFlows,
+  });
+}));
+
+integrationRouter.post("/repositories/:repositoryId/learning/feedback", asyncRoute(async (request, response) => {
+  const input = z.object({
+    action: z.enum(["Approved", "Rejected", "Edited", "Regenerated", "Validation Passed", "Validation Failed"]),
+    locatorStrategy: z.string().optional(),
+    confidenceDelta: z.number().optional(),
+  }).parse(request.body);
+  const profile = await addRepositoryLearningFeedback(String(request.params.repositoryId), input, request.userId);
+  if (!profile) {
+    response.status(404).json({ message: "Repository learning profile not found." });
+    return;
+  }
+  if (!(await requireWorkspaceRole(request, response, profile.workspaceId, ["Owner", "Admin", "QA Lead", "QA Engineer"]))) return;
+  response.json(profile);
+}));
+
+integrationRouter.get("/repositories/:repositoryId/learning/confidence", asyncRoute(async (request, response) => {
+  const repositoryId = String(request.params.repositoryId);
+  const profile = await getRepositoryLearningProfile(repositoryId) ?? await refreshRepositoryLearningProfile(repositoryId, request.userId);
+  if (!profile) {
+    response.status(404).json({ message: "Repository learning profile not found." });
+    return;
+  }
+  if (!(await requireWorkspaceRole(request, response, profile.workspaceId, ["Owner", "Admin", "QA Lead", "QA Engineer", "Viewer"]))) return;
+  response.json({
+    repositoryMatchScore: profile.repositoryMatchScore,
+    locatorConfidence: profile.locatorConfidence,
+    assertionConfidence: profile.assertionConfidence,
+    namingConfidence: profile.namingConfidence,
+    businessFlowConfidence: profile.businessFlowConfidence,
+    validationConfidence: profile.validationConfidence,
+    overallConfidence: profile.overallConfidence,
+    aiConfidenceTrend: profile.aiConfidenceTrend,
+  });
+}));
+
+integrationRouter.delete("/repositories/:repositoryId/learning", asyncRoute(async (request, response) => {
+  const profile = await getRepositoryLearningProfile(String(request.params.repositoryId));
+  if (!profile) {
+    response.status(404).json({ message: "Repository learning profile not found." });
+    return;
+  }
+  if (!(await requireWorkspaceRole(request, response, profile.workspaceId, ["Owner", "Admin"]))) return;
+  response.json(await resetRepositoryLearningProfile(String(request.params.repositoryId), request.userId));
 }));
 
 integrationRouter.post("/integrations/github/automation-onboarding/initialize", asyncRoute(async (request, response) => {

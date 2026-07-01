@@ -22,6 +22,7 @@ import type {
   AIProviderType,
   AIProviderUsageLog,
   AIProviderUsageStatus,
+  AIQualityMetric,
   ActivityLog,
   ApplicationRepositoryConfig,
   ApplicationRepositoryStatus,
@@ -49,6 +50,7 @@ import type {
   RepositoryGeneratedTestUpdate,
   RepositoryGeneratedTestUpdateStatus,
   RepositoryUpdatePullRequest,
+  RepositoryLearningProfile,
   RepositoryValidationRun,
   RepositoryValidationRecommendation,
   ReleaseReadinessSnapshot,
@@ -288,6 +290,8 @@ const initialDb: ProjectDatabase = {
   releaseReadinessSnapshots: [],
   repositoryUpdatePullRequests: [],
   repositoryAnalyses: [],
+  repositoryLearningProfiles: [],
+  aiQualityMetrics: [],
   repositorySyncs: [],
   playwrightValidations: [],
   extensionReports: [],
@@ -455,6 +459,8 @@ function normalizeDatabase(db: ProjectDatabase): ProjectDatabase {
     releaseReadinessSnapshots: db.releaseReadinessSnapshots ?? [],
     repositoryUpdatePullRequests: db.repositoryUpdatePullRequests ?? [],
     repositoryAnalyses: (db.repositoryAnalyses ?? []).map(normalizeRepositoryAnalysis),
+    repositoryLearningProfiles: (db.repositoryLearningProfiles ?? []).map(normalizeRepositoryLearningProfile),
+    aiQualityMetrics: (db.aiQualityMetrics ?? []).map(normalizeAIQualityMetric),
     repositorySyncs: (db.repositorySyncs ?? []).map(normalizeRepositorySync),
     playwrightValidations: (db.playwrightValidations ?? []).map(normalizePlaywrightValidation),
     extensionReports: (db.extensionReports ?? []).map(normalizeExtensionReport),
@@ -688,6 +694,95 @@ function normalizeRepositoryAnalysis(analysis: RepositoryAnalysis): RepositoryAn
     scannedFiles: analysis.scannedFiles ?? [],
     createdAt: timestamp,
     updatedAt: analysis.updatedAt ?? timestamp,
+  };
+}
+
+function normalizeRepositoryLearningProfile(profile: RepositoryLearningProfile): RepositoryLearningProfile {
+  const timestamp = profile.createdAt ?? now();
+  return {
+    ...profile,
+    framework: profile.framework ?? "Unknown",
+    language: profile.language ?? "Unknown",
+    packageManager: profile.packageManager ?? "Unknown",
+    testDirectories: profile.testDirectories ?? [],
+    pageObjectDirectories: profile.pageObjectDirectories ?? [],
+    fixtureDirectories: profile.fixtureDirectories ?? [],
+    helperDirectories: profile.helperDirectories ?? [],
+    locatorPreferences: profile.locatorPreferences ?? [{ strategy: "getByRole", weight: 70, source: "default" }],
+    namingPatterns: {
+      testFilePattern: profile.namingPatterns?.testFilePattern ?? "*.spec.ts",
+      describePattern: profile.namingPatterns?.describePattern ?? "test.describe('<feature>')",
+      testCasePattern: profile.namingPatterns?.testCasePattern ?? "should <expected behavior>",
+      pageObjectPattern: profile.namingPatterns?.pageObjectPattern ?? "*Page.ts",
+      fixturePattern: profile.namingPatterns?.fixturePattern ?? "*.fixture.ts",
+      helperPattern: profile.namingPatterns?.helperPattern ?? "*.helper.ts",
+      folderPattern: profile.namingPatterns?.folderPattern ?? "tests/<feature>",
+    },
+    testStylePatterns: {
+      importStyle: profile.testStylePatterns?.importStyle ?? "@playwright/test",
+      describeStructure: profile.testStylePatterns?.describeStructure ?? "describe + test blocks",
+      beforeEachPattern: profile.testStylePatterns?.beforeEachPattern ?? "Detected when present",
+      fixtureUsage: profile.testStylePatterns?.fixtureUsage ?? "None detected",
+      pageObjectUsage: profile.testStylePatterns?.pageObjectUsage ?? "None detected",
+      assertionStyle: profile.testStylePatterns?.assertionStyle ?? "Business outcome assertions",
+      navigationStyle: profile.testStylePatterns?.navigationStyle ?? "Use configured baseURL/routes",
+      dataSetupStyle: profile.testStylePatterns?.dataSetupStyle ?? "Inline or fixture-backed data",
+      cleanupStyle: profile.testStylePatterns?.cleanupStyle ?? "Repository default",
+      commentsStyle: profile.testStylePatterns?.commentsStyle ?? "Minimal comments",
+    },
+    authPatterns: profile.authPatterns ?? [],
+    commonFlows: profile.commonFlows ?? [],
+    acceptedGenerationCount: profile.acceptedGenerationCount ?? 0,
+    rejectedGenerationCount: profile.rejectedGenerationCount ?? 0,
+    editedGenerationCount: profile.editedGenerationCount ?? 0,
+    validationPassCount: profile.validationPassCount ?? 0,
+    validationFailCount: profile.validationFailCount ?? 0,
+    repositoryMatchScore: profile.repositoryMatchScore ?? 0,
+    locatorConfidence: profile.locatorConfidence ?? 0,
+    assertionConfidence: profile.assertionConfidence ?? 0,
+    namingConfidence: profile.namingConfidence ?? 0,
+    businessFlowConfidence: profile.businessFlowConfidence ?? 0,
+    validationConfidence: profile.validationConfidence ?? 0,
+    overallConfidence: profile.overallConfidence ?? 0,
+    aiConfidenceTrend: profile.aiConfidenceTrend ?? [],
+    createdAt: timestamp,
+    updatedAt: profile.updatedAt ?? timestamp,
+  };
+}
+
+function qualityLabel(score: number): AIQualityMetric["qualityLabel"] {
+  if (score >= 95) return "Enterprise Ready";
+  if (score >= 90) return "Excellent";
+  if (score >= 80) return "Good";
+  if (score >= 70) return "Needs Improvement";
+  return "Low Quality";
+}
+
+function normalizeAIQualityMetric(metric: AIQualityMetric): AIQualityMetric {
+  const timestamp = metric.createdAt ?? now();
+  const overallQualityScore = clampScore(metric.overallQualityScore ?? 0);
+  return {
+    ...metric,
+    aiProvider: metric.aiProvider ?? "AI QA Copilot Default AI",
+    aiModel: metric.aiModel ?? process.env.GROQ_MODEL ?? "llama-3.3-70b-versatile",
+    requirementCoverage: clampScore(metric.requirementCoverage ?? 0),
+    repositoryMatchScore: clampScore(metric.repositoryMatchScore ?? 0),
+    testGenerationAccuracy: clampScore(metric.testGenerationAccuracy ?? 0),
+    validationSuccessRate: clampScore(metric.validationSuccessRate ?? 0),
+    manualEditRate: clampScore(metric.manualEditRate ?? 0),
+    manualEditScore: clampScore(metric.manualEditScore ?? 100 - (metric.manualEditRate ?? 0)),
+    userAcceptanceRate: clampScore(metric.userAcceptanceRate ?? 0),
+    aiConfidenceScore: clampScore(metric.aiConfidenceScore ?? overallQualityScore),
+    overallQualityScore,
+    qualityLabel: metric.qualityLabel ?? qualityLabel(overallQualityScore),
+    generatedLines: metric.generatedLines ?? 0,
+    editedLines: metric.editedLines ?? 0,
+    accepted: Boolean(metric.accepted),
+    rejected: Boolean(metric.rejected),
+    regenerated: Boolean(metric.regenerated),
+    validationPassed: Boolean(metric.validationPassed),
+    validationFailed: Boolean(metric.validationFailed),
+    createdAt: timestamp,
   };
 }
 
@@ -1418,6 +1513,328 @@ export async function getAnalyticsExports(filters: AnalyticsFilters) {
       { name: "Approved", value: histories.filter((history) => history.reviewStatus === "Approved").length },
       { name: "Draft", value: histories.filter((history) => history.reviewStatus === "Draft").length },
     ],
+  };
+}
+
+export interface AIQualityFilters extends AnalyticsFilters {
+  repositoryId?: string;
+  aiProvider?: string;
+  validationMode?: string;
+}
+
+function countLines(value: string) {
+  return value.trim() ? value.trim().split(/\r?\n/).length : 0;
+}
+
+function estimateEditedLines(original: string, updated: string) {
+  if (!original.trim()) return 0;
+  const originalLines = original.trim().split(/\r?\n/);
+  const updatedLines = updated.trim().split(/\r?\n/);
+  const length = Math.max(originalLines.length, updatedLines.length);
+  let changed = Math.abs(originalLines.length - updatedLines.length);
+  for (let index = 0; index < Math.min(originalLines.length, updatedLines.length); index += 1) {
+    if (originalLines[index]?.trim() !== updatedLines[index]?.trim()) changed += 1;
+  }
+  return Math.min(length, changed);
+}
+
+function weightedQualityScore(input: {
+  requirementCoverage: number;
+  repositoryMatchScore: number;
+  validationSuccessRate: number;
+  userAcceptanceRate: number;
+  manualEditScore: number;
+  aiConfidenceScore: number;
+}) {
+  return clampScore(
+    input.requirementCoverage * 0.25 +
+    input.repositoryMatchScore * 0.2 +
+    input.validationSuccessRate * 0.2 +
+    input.userAcceptanceRate * 0.15 +
+    input.manualEditScore * 0.1 +
+    input.aiConfidenceScore * 0.1,
+  );
+}
+
+function matchesQualityDate(createdAt: string, filters: AIQualityFilters) {
+  return (!filters.dateFrom || createdAt >= filters.dateFrom) && (!filters.dateTo || createdAt <= filters.dateTo);
+}
+
+function buildAIQualityMetrics(db: ProjectDatabase, filters: AIQualityFilters = {}): AIQualityMetric[] {
+  const workspaceRepositoryConfig = filters.repositoryId
+    ? db.automationRepositoryConfigs.find((config) => config.id === filters.repositoryId)
+    : null;
+  const workspaceLearningProfiles = db.repositoryLearningProfiles.filter(
+    (profile) =>
+      (!filters.workspaceId || profile.workspaceId === filters.workspaceId) &&
+      (!filters.repositoryId || profile.repositoryId === filters.repositoryId),
+  );
+  const defaultRepositoryMatch = average(workspaceLearningProfiles.map((profile) => profile.repositoryMatchScore)) || 75;
+  const defaultAIConfidence = average(workspaceLearningProfiles.map((profile) => profile.overallConfidence)) || 75;
+  const validationRuns = db.repositoryValidationRuns.filter(
+    (run) =>
+      (!filters.workspaceId || run.workspaceId === filters.workspaceId) &&
+      (!filters.projectId || run.projectId === filters.projectId) &&
+      (!filters.validationMode || run.validationMode === filters.validationMode) &&
+      matchesQualityDate(run.createdAt, filters),
+  );
+  const validationSuccessRate = validationRuns.length
+    ? Math.round((validationRuns.filter((run) => run.status === "Passed").length / validationRuns.length) * 100)
+    : 70;
+
+  const historyMetrics: AIQualityMetric[] = db.histories
+    .filter((history) => matchesAnalyticsFilters(history, filters))
+    .filter((history) => !filters.repositoryId || history.workspaceId === workspaceRepositoryConfig?.workspaceId)
+    .filter((history) => !filters.aiProvider || history.aiModelUsed.toLowerCase().includes(filters.aiProvider.toLowerCase()))
+    .map((history) => {
+      const requirement = db.requirements.find((item) => item.id === history.requirementId);
+      const totalCriteria = requirement?.acceptanceCriteria
+        ? requirement.acceptanceCriteria.split(/\r?\n|;|\./).filter((item) => item.trim()).length
+        : history.output.acceptanceCriteria.length;
+      const coveredCriteria = Math.min(totalCriteria || history.output.acceptanceCriteria.length, history.output.acceptanceCriteria.length);
+      const requirementCoverage = totalCriteria ? Math.round((coveredCriteria / totalCriteria) * 100) : history.coverageScore;
+      const accepted = history.reviewStatus === "Approved";
+      const rejected = history.reviewStatus === "Rejected";
+      const generatedLines = countLines(JSON.stringify(history.output, null, 2));
+      const manualEditRate = history.reviewStatus === "Changes Requested" ? 20 : history.reviewStatus === "Rejected" ? 35 : 0;
+      const manualEditScore = 100 - manualEditRate;
+      const userAcceptanceRate = accepted ? 100 : rejected ? 0 : history.reviewStatus === "Submitted for Review" ? 65 : 55;
+      const testGenerationAccuracy = accepted ? 95 : rejected ? 25 : history.reviewStatus === "Changes Requested" ? 55 : 70;
+      const aiConfidenceScore = clampScore((history.coverageScore + requirementCoverage + defaultAIConfidence) / 3);
+      const repositoryMatchScore = defaultRepositoryMatch;
+      const overallQualityScore = weightedQualityScore({
+        requirementCoverage,
+        repositoryMatchScore,
+        validationSuccessRate,
+        userAcceptanceRate,
+        manualEditScore,
+        aiConfidenceScore,
+      });
+      return {
+        id: `quality_${history.id}`,
+        workspaceId: history.workspaceId,
+        projectId: history.projectId,
+        repositoryId: filters.repositoryId,
+        generatedOutputId: history.id,
+        requirementId: history.requirementId,
+        aiProvider: "AI QA Copilot",
+        aiModel: history.aiModelUsed,
+        requirementCoverage,
+        repositoryMatchScore,
+        testGenerationAccuracy,
+        validationSuccessRate,
+        manualEditRate,
+        manualEditScore,
+        userAcceptanceRate,
+        aiConfidenceScore,
+        overallQualityScore,
+        qualityLabel: qualityLabel(overallQualityScore),
+        generatedLines,
+        editedLines: Math.round(generatedLines * (manualEditRate / 100)),
+        accepted,
+        rejected,
+        regenerated: history.version > 1,
+        validationPassed: false,
+        validationFailed: false,
+        createdBy: history.userId,
+        createdAt: history.generatedAt,
+      };
+    });
+
+  const repositoryUpdateMetrics: AIQualityMetric[] = db.repositoryGeneratedTestUpdates
+    .filter((update) => (!filters.workspaceId || update.workspaceId === filters.workspaceId))
+    .filter((update) => (!filters.projectId || update.projectId === filters.projectId))
+    .filter((update) => matchesQualityDate(update.createdAt, filters))
+    .filter((update) => !filters.repositoryId || db.automationRepositoryConfigs.some((config) => config.id === filters.repositoryId && config.workspaceId === update.workspaceId))
+    .filter((update) => !filters.aiProvider || update.aiProvider.toLowerCase().includes(filters.aiProvider.toLowerCase()))
+    .map((update) => {
+      const relatedValidation = db.repositoryValidationRuns
+        .filter((run) => run.impactAnalysisId === update.impactAnalysisId)
+        .sort((a, b) => b.createdAt.localeCompare(a.createdAt))[0];
+      const generatedLines = countLines(update.newCode);
+      const editedLines = update.status === "Edited" ? estimateEditedLines(update.oldCode, update.newCode) || Math.max(1, Math.round(generatedLines * 0.08)) : 0;
+      const manualEditRate = generatedLines ? clampScore(Math.round((editedLines / generatedLines) * 100)) : 0;
+      const manualEditScore = 100 - manualEditRate;
+      const accepted = update.status === "Approved" || update.status === "Edited";
+      const rejected = update.status === "Rejected";
+      const validationPassed = relatedValidation?.status === "Passed";
+      const validationFailed = relatedValidation?.status === "Failed" || relatedValidation?.status === "Error";
+      const userAcceptanceRate = accepted ? 100 : rejected ? 0 : 60;
+      const validationRate = relatedValidation ? (validationPassed ? 100 : validationFailed ? 0 : 50) : validationSuccessRate;
+      const testGenerationAccuracy = validationPassed ? 100 : accepted ? 85 : rejected ? 20 : 65;
+      const requirementCoverage = update.businessCoverageScore ?? update.qualityReport?.businessCoverage ?? 75;
+      const repositoryMatchScore = update.repositoryMatchScore ?? update.qualityReport?.repositoryStyleMatch ?? defaultRepositoryMatch;
+      const aiConfidenceScore = update.repositoryLearningUsed?.overallConfidence ?? update.confidenceScore ?? defaultAIConfidence;
+      const overallQualityScore = weightedQualityScore({
+        requirementCoverage,
+        repositoryMatchScore,
+        validationSuccessRate: validationRate,
+        userAcceptanceRate,
+        manualEditScore,
+        aiConfidenceScore,
+      });
+      return {
+        id: `quality_${update.id}`,
+        workspaceId: update.workspaceId,
+        projectId: update.projectId,
+        repositoryId: db.automationRepositoryConfigs.find((config) => config.workspaceId === update.workspaceId)?.id,
+        generatedOutputId: update.id,
+        validationRunId: relatedValidation?.id,
+        aiProvider: update.aiProvider,
+        aiModel: update.aiModel,
+        requirementCoverage,
+        repositoryMatchScore,
+        testGenerationAccuracy,
+        validationSuccessRate: validationRate,
+        manualEditRate,
+        manualEditScore,
+        userAcceptanceRate,
+        aiConfidenceScore,
+        overallQualityScore,
+        qualityLabel: qualityLabel(overallQualityScore),
+        generatedLines,
+        editedLines,
+        accepted,
+        rejected,
+        regenerated: false,
+        validationPassed,
+        validationFailed,
+        createdBy: update.createdBy,
+        createdAt: update.createdAt,
+      };
+    });
+
+  return [...historyMetrics, ...repositoryUpdateMetrics].map(normalizeAIQualityMetric);
+}
+
+function qualityDistribution(metrics: AIQualityMetric[]) {
+  const labels: AIQualityMetric["qualityLabel"][] = ["Enterprise Ready", "Excellent", "Good", "Needs Improvement", "Low Quality"];
+  return labels.map((name) => ({ name, value: metrics.filter((metric) => metric.qualityLabel === name).length }));
+}
+
+function qualityMetricSuggestions(metric: AIQualityMetric) {
+  const suggestions: string[] = [];
+  if (metric.requirementCoverage < 80) suggestions.push("Increase requirement coverage by adding missing acceptance criteria, negative tests, and edge cases.");
+  if (metric.repositoryMatchScore < 85) suggestions.push("Improve repository match by following learned naming, folder, locator, and Page Object patterns.");
+  if (metric.validationSuccessRate < 80) suggestions.push("Run validation and address failing Playwright tests before creating a pull request.");
+  if (metric.manualEditRate > 15) suggestions.push("Reduce manual edits by improving locator strategy and using repository helpers/fixtures.");
+  if (metric.userAcceptanceRate < 70) suggestions.push("Review rejected or regenerated outputs and strengthen prompts with clearer business expectations.");
+  if (metric.aiConfidenceScore < 80) suggestions.push("Refresh repository learning and reuse accepted tests as examples for future generations.");
+  return suggestions.length ? suggestions : ["AI output is performing well. Continue validating and approving high-confidence updates."];
+}
+
+export async function getAIQualitySummary(filters: AIQualityFilters = {}) {
+  const db = await readDb();
+  const metrics = buildAIQualityMetrics(db, filters);
+  const latestMetric = [...metrics].sort((a, b) => b.createdAt.localeCompare(a.createdAt))[0];
+  const score = average(metrics.map((metric) => metric.overallQualityScore));
+  const manualEditRate = average(metrics.map((metric) => metric.manualEditRate));
+  const accepted = metrics.filter((metric) => metric.accepted).length;
+  const rejected = metrics.filter((metric) => metric.rejected).length;
+  return {
+    overallQualityScore: score,
+    qualityLabel: qualityLabel(score),
+    requirementCoverage: average(metrics.map((metric) => metric.requirementCoverage)),
+    repositoryMatchScore: average(metrics.map((metric) => metric.repositoryMatchScore)),
+    testGenerationAccuracy: average(metrics.map((metric) => metric.testGenerationAccuracy)),
+    validationSuccessRate: average(metrics.map((metric) => metric.validationSuccessRate)),
+    manualEditRate,
+    manualEditScore: 100 - manualEditRate,
+    userAcceptanceRate: average(metrics.map((metric) => metric.userAcceptanceRate)),
+    aiConfidenceScore: average(metrics.map((metric) => metric.aiConfidenceScore)),
+    totalGeneratedOutputs: metrics.length,
+    acceptedOutputs: accepted,
+    rejectedOutputs: rejected,
+    editedOutputs: metrics.filter((metric) => metric.editedLines > 0).length,
+    validationPassed: metrics.filter((metric) => metric.validationPassed).length,
+    validationFailed: metrics.filter((metric) => metric.validationFailed).length,
+    qualityDistribution: qualityDistribution(metrics),
+    improvementSuggestions: latestMetric ? qualityMetricSuggestions(latestMetric) : ["Generate AI tests and run validation to build quality evidence."],
+  };
+}
+
+export async function getAIQualityProject(projectId: string, filters: AIQualityFilters = {}) {
+  return getAIQualitySummary({ ...filters, projectId });
+}
+
+export async function getAIQualityRepository(repositoryId: string, filters: AIQualityFilters = {}) {
+  return getAIQualitySummary({ ...filters, repositoryId });
+}
+
+export async function getAIQualityTrends(filters: AIQualityFilters = {}) {
+  const db = await readDb();
+  const metrics = buildAIQualityMetrics(db, filters);
+  const trend = new Map<string, {
+    quality: number[];
+    confidence: number[];
+    coverage: number[];
+    repositoryMatch: number[];
+    validation: number[];
+    manualEdit: number[];
+    acceptance: number[];
+  }>();
+  metrics.forEach((metric) => {
+    const key = dateKey(metric.createdAt);
+    const current = trend.get(key) ?? { quality: [], confidence: [], coverage: [], repositoryMatch: [], validation: [], manualEdit: [], acceptance: [] };
+    current.quality.push(metric.overallQualityScore);
+    current.confidence.push(metric.aiConfidenceScore);
+    current.coverage.push(metric.requirementCoverage);
+    current.repositoryMatch.push(metric.repositoryMatchScore);
+    current.validation.push(metric.validationSuccessRate);
+    current.manualEdit.push(metric.manualEditRate);
+    current.acceptance.push(metric.userAcceptanceRate);
+    trend.set(key, current);
+  });
+  return [...trend.entries()].sort(([a], [b]) => a.localeCompare(b)).map(([date, value]) => ({
+    date,
+    qualityScore: average(value.quality),
+    aiConfidenceScore: average(value.confidence),
+    requirementCoverage: average(value.coverage),
+    repositoryMatchScore: average(value.repositoryMatch),
+    validationSuccessRate: average(value.validation),
+    manualEditRate: average(value.manualEdit),
+    userAcceptanceRate: average(value.acceptance),
+  }));
+}
+
+export async function getAIQualityGeneratedOutput(outputId: string) {
+  const db = await readDb();
+  const metric = buildAIQualityMetrics(db).find((item) => item.generatedOutputId === outputId || item.id === outputId);
+  if (!metric) return null;
+  const history = db.histories.find((item) => item.id === metric.generatedOutputId);
+  const update = db.repositoryGeneratedTestUpdates.find((item) => item.id === metric.generatedOutputId);
+  return {
+    metric,
+    outputType: history ? "Test Case Generation" : update ? "Playwright Update" : "Generated Output",
+    title: history
+      ? db.requirements.find((requirement) => requirement.id === history.requirementId)?.title ?? "Generated test plan"
+      : update?.testFilePath ?? "Generated output",
+    validationResult: metric.validationRunId ? db.repositoryValidationRuns.find((run) => run.id === metric.validationRunId) ?? null : null,
+    improvementSuggestions: qualityMetricSuggestions(metric),
+  };
+}
+
+export async function recalculateAIQualityMetrics(filters: AIQualityFilters = {}, userId?: string) {
+  const db = await readDb();
+  const metrics = buildAIQualityMetrics(db, filters);
+  const workspaceIds = new Set(metrics.map((metric) => metric.workspaceId));
+  db.aiQualityMetrics = [
+    ...metrics,
+    ...db.aiQualityMetrics.filter((metric) => !workspaceIds.has(metric.workspaceId)),
+  ].slice(0, 1000);
+  if (metrics.length) {
+    addActivityLog(db, {
+      workspaceId: metrics[0].workspaceId,
+      actorId: userId,
+      action: "AI quality metrics recalculated",
+      resourceType: "AIQualityMetric",
+      newValue: { count: metrics.length, averageScore: average(metrics.map((metric) => metric.overallQualityScore)) },
+    });
+  }
+  await writeDb(db);
+  return {
+    recalculated: metrics.length,
+    summary: await getAIQualitySummary(filters),
   };
 }
 
@@ -2857,6 +3274,189 @@ export async function overrideRepositoryAnalysis(
   });
   await writeDb(db);
   return analysis;
+}
+
+function clampScore(value: number) {
+  return Math.max(0, Math.min(100, Math.round(value)));
+}
+
+function preferredLocatorFromUpdates(updates: RepositoryGeneratedTestUpdate[], analysis?: RepositoryAnalysis | null) {
+  const scores = new Map<string, number>();
+  const add = (strategy: string, weight: number) => scores.set(strategy, (scores.get(strategy) ?? 0) + weight);
+  if (analysis?.usesPageObjectModel) add("Page Object locators", 70);
+  if (analysis?.importStyle?.includes("@playwright/test")) add("getByRole", 60);
+  for (const update of updates) {
+    const code = `${update.oldCode}\n${update.newCode}`;
+    if (code.includes("getByTestId")) add("getByTestId", update.status === "Approved" ? 35 : 18);
+    if (code.includes("getByRole")) add("getByRole", update.status === "Approved" ? 30 : 15);
+    if (code.includes("getByLabel")) add("getByLabel", 22);
+    if (code.includes("getByPlaceholder")) add("getByPlaceholder", 18);
+    if (code.includes("getByText")) add("getByText", 12);
+    if (/locator\(['"`][.#\[]/.test(code)) add("CSS selector", 8);
+    if (/xpath|locator\(['"`]\/\//.test(code)) add("XPath", 3);
+  }
+  if (!scores.size) add("getByRole", 70);
+  return Array.from(scores.entries())
+    .map(([strategy, weight]) => ({ strategy, weight: clampScore(weight), source: "repository-learning" }))
+    .sort((a, b) => b.weight - a.weight)
+    .slice(0, 5);
+}
+
+function buildRepositoryLearningProfileFromDb(db: ProjectDatabase, repositoryId: string, _userId?: string): RepositoryLearningProfile | null {
+  const config = db.automationRepositoryConfigs.find((item) => item.id === repositoryId);
+  if (!config) return null;
+  const analysis = db.repositoryAnalyses.find((item) => item.workspaceId === config.workspaceId && item.integrationId === config.id) ?? null;
+  const updates = db.repositoryGeneratedTestUpdates.filter((update) => update.workspaceId === config.workspaceId);
+  const validations = db.repositoryValidationRuns.filter((run) => run.workspaceId === config.workspaceId);
+  const accepted = updates.filter((update) => update.status === "Approved").length;
+  const rejected = updates.filter((update) => update.status === "Rejected").length;
+  const edited = updates.filter((update) => update.status === "Edited").length;
+  const passed = validations.filter((run) => run.status === "Passed").length;
+  const failed = validations.filter((run) => run.status === "Failed").length;
+  const locatorPreferences = preferredLocatorFromUpdates(updates, analysis);
+  const repositoryMatchScore = clampScore(analysis?.confidenceScore ?? 65);
+  const locatorConfidence = clampScore(locatorPreferences[0]?.weight ?? 70);
+  const assertionConfidence = clampScore(70 + Math.min(20, accepted * 2) - Math.min(15, failed * 2));
+  const namingConfidence = clampScore(analysis?.namingConvention ? 86 : 68);
+  const businessFlowConfidence = clampScore(72 + Math.min(18, accepted + passed * 2) - Math.min(12, rejected));
+  const validationConfidence = clampScore(validations.length ? (passed / Math.max(1, passed + failed)) * 100 : 70);
+  const overallConfidence = clampScore((repositoryMatchScore + locatorConfidence + assertionConfidence + namingConfidence + businessFlowConfidence + validationConfidence) / 6);
+  const timestamp = now();
+  const existing = db.repositoryLearningProfiles.find((profile) => profile.repositoryId === repositoryId && profile.workspaceId === config.workspaceId);
+  return {
+    id: existing?.id ?? createId("repo_learning"),
+    workspaceId: config.workspaceId,
+    projectId: existing?.projectId,
+    repositoryId: config.id,
+    repositoryName: `${config.owner}/${config.repo}`,
+    branch: config.defaultBranch,
+    framework: analysis?.framework ?? "Playwright",
+    frameworkVersion: analysis?.playwrightVersion,
+    language: analysis?.language ?? "TypeScript",
+    packageManager: analysis?.packageManager ?? analysis?.buildTool ?? "npm",
+    testDirectories: [analysis?.testFolderPath ?? config.testFolderPath].filter(Boolean),
+    pageObjectDirectories: analysis?.pageObjectFolderPath ? [analysis.pageObjectFolderPath] : [],
+    fixtureDirectories: analysis?.usesFixtures ? ["fixtures"] : [],
+    helperDirectories: ["utils", "helpers"].filter((directory) => analysis?.scannedFiles?.some((file) => file.includes(directory))),
+    locatorPreferences,
+    namingPatterns: {
+      testFilePattern: analysis?.namingConvention ?? "*.spec.ts",
+      describePattern: "test.describe('<feature>')",
+      testCasePattern: "validates <business outcome>",
+      pageObjectPattern: analysis?.usesPageObjectModel ? "*Page.ts" : "Not detected",
+      fixturePattern: analysis?.usesFixtures ? "*.fixture.ts" : "Not detected",
+      helperPattern: "*.helper.ts",
+      folderPattern: analysis?.testFolderPath ?? config.testFolderPath,
+    },
+    testStylePatterns: {
+      importStyle: analysis?.importStyle ?? "@playwright/test",
+      describeStructure: analysis?.pattern ?? "Direct Playwright",
+      beforeEachPattern: updates.some((update) => /beforeEach/.test(`${update.oldCode}\n${update.newCode}`)) ? "beforeEach detected" : "Use when setup is shared",
+      fixtureUsage: analysis?.usesFixtures ? "Repository fixtures detected" : "No fixture pattern detected",
+      pageObjectUsage: analysis?.usesPageObjectModel ? "Page Object Model enabled" : "Direct Playwright interactions",
+      assertionStyle: "Business outcome assertions",
+      navigationStyle: "Use baseURL and repository routes",
+      dataSetupStyle: analysis?.usesFixtures ? "Fixture-backed data" : "Inline realistic test data",
+      cleanupStyle: "Follow repository default cleanup",
+      commentsStyle: "Minimal comments for generated code",
+    },
+    authPatterns: analysis?.scannedFiles?.filter((file) => /auth|login|session/i.test(file)).slice(0, 8) ?? [],
+    commonFlows: Array.from(new Set(updates.map((update) => update.testFilePath.split("/").pop()?.replace(/\.(spec|test)\.[^.]+$/, "") ?? "flow"))).slice(0, 8),
+    acceptedGenerationCount: accepted,
+    rejectedGenerationCount: rejected,
+    editedGenerationCount: edited,
+    validationPassCount: passed,
+    validationFailCount: failed,
+    repositoryMatchScore,
+    locatorConfidence,
+    assertionConfidence,
+    namingConfidence,
+    businessFlowConfidence,
+    validationConfidence,
+    overallConfidence,
+    aiConfidenceTrend: [
+      ...(existing?.aiConfidenceTrend ?? []).slice(-9),
+      { date: timestamp, score: overallConfidence, event: "Repository learning refreshed" },
+    ],
+    lastAnalyzedCommit: validations[0]?.workflowCommitSha ?? existing?.lastAnalyzedCommit,
+    lastAnalyzedAt: timestamp,
+    createdAt: existing?.createdAt ?? timestamp,
+    updatedAt: timestamp,
+  };
+}
+
+export async function getRepositoryLearningProfile(repositoryId: string) {
+  const db = await readDb();
+  const existing = db.repositoryLearningProfiles.find((profile) => profile.repositoryId === repositoryId);
+  if (existing) return normalizeRepositoryLearningProfile(existing);
+  return buildRepositoryLearningProfileFromDb(db, repositoryId);
+}
+
+export async function refreshRepositoryLearningProfile(repositoryId: string, userId?: string) {
+  const db = await readDb();
+  const profile = buildRepositoryLearningProfileFromDb(db, repositoryId, userId);
+  if (!profile) return null;
+  db.repositoryLearningProfiles = db.repositoryLearningProfiles.filter((item) => item.id !== profile.id && item.repositoryId !== repositoryId);
+  db.repositoryLearningProfiles.unshift(profile);
+  addActivityLog(db, {
+    workspaceId: profile.workspaceId,
+    actorId: userId,
+    action: "Repository learning refreshed",
+    resourceType: "RepositoryLearningProfile",
+    resourceId: profile.id,
+    newValue: { overallConfidence: profile.overallConfidence, locator: profile.locatorPreferences[0]?.strategy },
+  });
+  await writeDb(db);
+  return profile;
+}
+
+export async function resetRepositoryLearningProfile(repositoryId: string, userId?: string) {
+  const db = await readDb();
+  const existing = db.repositoryLearningProfiles.find((profile) => profile.repositoryId === repositoryId);
+  db.repositoryLearningProfiles = db.repositoryLearningProfiles.filter((profile) => profile.repositoryId !== repositoryId);
+  if (existing) {
+    addActivityLog(db, {
+      workspaceId: existing.workspaceId,
+      actorId: userId,
+      action: "Repository learning reset",
+      resourceType: "RepositoryLearningProfile",
+      resourceId: existing.id,
+    });
+  }
+  await writeDb(db);
+  return { reset: Boolean(existing) };
+}
+
+export async function addRepositoryLearningFeedback(repositoryId: string, input: {
+  action: "Approved" | "Rejected" | "Edited" | "Regenerated" | "Validation Passed" | "Validation Failed";
+  locatorStrategy?: string;
+  confidenceDelta?: number;
+}, userId?: string) {
+  const db = await readDb();
+  let profile = db.repositoryLearningProfiles.find((item) => item.repositoryId === repositoryId)
+    ?? buildRepositoryLearningProfileFromDb(db, repositoryId, userId);
+  if (!profile) return null;
+  profile = normalizeRepositoryLearningProfile(profile);
+  if (input.action === "Approved") profile.acceptedGenerationCount += 1;
+  if (input.action === "Rejected") profile.rejectedGenerationCount += 1;
+  if (input.action === "Edited") profile.editedGenerationCount += 1;
+  if (input.action === "Validation Passed") profile.validationPassCount += 1;
+  if (input.action === "Validation Failed") profile.validationFailCount += 1;
+  if (input.locatorStrategy) {
+    const existing = profile.locatorPreferences.find((item) => item.strategy === input.locatorStrategy);
+    if (existing) existing.weight = clampScore(existing.weight + 8);
+    else profile.locatorPreferences.unshift({ strategy: input.locatorStrategy, weight: 72, source: "team-feedback" });
+  }
+  profile.overallConfidence = clampScore(profile.overallConfidence + (input.confidenceDelta ?? (input.action.includes("Failed") || input.action === "Rejected" ? -4 : 3)));
+  profile.aiConfidenceTrend = [
+    ...profile.aiConfidenceTrend.slice(-9),
+    { date: now(), score: profile.overallConfidence, event: input.action },
+  ];
+  profile.updatedAt = now();
+  db.repositoryLearningProfiles = db.repositoryLearningProfiles.filter((item) => item.id !== profile.id && item.repositoryId !== repositoryId);
+  db.repositoryLearningProfiles.unshift(profile);
+  await writeDb(db);
+  return profile;
 }
 
 export async function latestRepositorySync(workspaceId = defaultWorkspaceId) {

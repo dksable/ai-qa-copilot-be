@@ -3,6 +3,7 @@ import type {
   RepositoryImpactAnalysis,
   RepositoryImpactAnalysisTest,
   RepositoryAnalysis,
+  RepositoryLearningProfile,
   RepositoryValidationRecommendation,
   RepositoryValidationRun,
 } from "./projectTypes.js";
@@ -81,7 +82,8 @@ function routeFromChangedFile(filePath: string) {
   return `/${routeName || "feature"}`;
 }
 
-function inferLocatorStrategy(oldCode: string, repositoryAnalysis?: RepositoryAnalysis) {
+function inferLocatorStrategy(oldCode: string, repositoryAnalysis?: RepositoryAnalysis, learningProfile?: RepositoryLearningProfile | null) {
+  if (learningProfile?.locatorPreferences?.[0]?.strategy) return learningProfile.locatorPreferences[0].strategy;
   const candidates = [
     { matcher: /getByTestId/g, label: "getByTestId" },
     { matcher: /getByRole/g, label: "getByRole" },
@@ -110,18 +112,18 @@ function extractExistingGoto(oldCode: string) {
   return oldCode.match(/page\.goto\(([^)]+)\)/)?.[1];
 }
 
-function buildRepositoryContextSummary(oldCode: string, repositoryAnalysis?: RepositoryAnalysis): NonNullable<RepositoryGeneratedTestUpdate["repositoryContextSummary"]> {
+function buildRepositoryContextSummary(oldCode: string, repositoryAnalysis?: RepositoryAnalysis, learningProfile?: RepositoryLearningProfile | null): NonNullable<RepositoryGeneratedTestUpdate["repositoryContextSummary"]> {
   return {
-    framework: repositoryAnalysis?.framework ?? "Playwright",
-    language: repositoryAnalysis?.language ?? "TypeScript",
-    pattern: repositoryAnalysis?.pattern ?? (repositoryAnalysis?.usesPageObjectModel ? "Page Object Model" : "Direct Playwright"),
-    usesPageObjectModel: repositoryAnalysis?.usesPageObjectModel ?? /new\s+\w+Page\(/.test(oldCode),
-    usesFixtures: repositoryAnalysis?.usesFixtures ?? /test\.extend|fixtures?\//i.test(oldCode),
-    locatorStrategy: inferLocatorStrategy(oldCode, repositoryAnalysis),
-    assertionStyle: inferAssertionStyle(oldCode),
-    testFolderPath: repositoryAnalysis?.testFolderPath,
-    pageObjectFolderPath: repositoryAnalysis?.pageObjectFolderPath,
-    playwrightVersion: repositoryAnalysis?.playwrightVersion,
+    framework: learningProfile?.framework ?? repositoryAnalysis?.framework ?? "Playwright",
+    language: learningProfile?.language ?? repositoryAnalysis?.language ?? "TypeScript",
+    pattern: learningProfile?.testStylePatterns?.describeStructure ?? repositoryAnalysis?.pattern ?? (repositoryAnalysis?.usesPageObjectModel ? "Page Object Model" : "Direct Playwright"),
+    usesPageObjectModel: learningProfile?.testStylePatterns?.pageObjectUsage?.includes("Page Object") ?? repositoryAnalysis?.usesPageObjectModel ?? /new\s+\w+Page\(/.test(oldCode),
+    usesFixtures: learningProfile?.testStylePatterns?.fixtureUsage?.includes("fixtures") ?? repositoryAnalysis?.usesFixtures ?? /test\.extend|fixtures?\//i.test(oldCode),
+    locatorStrategy: inferLocatorStrategy(oldCode, repositoryAnalysis, learningProfile),
+    assertionStyle: learningProfile?.testStylePatterns?.assertionStyle ?? inferAssertionStyle(oldCode),
+    testFolderPath: learningProfile?.testDirectories?.[0] ?? repositoryAnalysis?.testFolderPath,
+    pageObjectFolderPath: learningProfile?.pageObjectDirectories?.[0] ?? repositoryAnalysis?.pageObjectFolderPath,
+    playwrightVersion: learningProfile?.frameworkVersion ?? repositoryAnalysis?.playwrightVersion,
   };
 }
 
@@ -129,13 +131,14 @@ function buildQualityReport(input: {
   oldCode: string;
   impactedTest: RepositoryImpactAnalysisTest;
   repositoryAnalysis?: RepositoryAnalysis;
+  learningProfile?: RepositoryLearningProfile | null;
   context: NonNullable<RepositoryGeneratedTestUpdate["repositoryContextSummary"]>;
 }) {
   const hasOldCode = Boolean(input.oldCode.trim());
-  const repositoryStyleMatch = clampScore((input.repositoryAnalysis?.confidenceScore ?? 72) + (hasOldCode ? 10 : 0));
-  const locatorQuality = clampScore(input.context.locatorStrategy === "XPath" ? 58 : input.context.locatorStrategy === "CSS selectors" ? 72 : 92);
-  const assertionQuality = clampScore(input.context.assertionStyle === "Navigation assertions" ? 72 : 90);
-  const businessCoverage = clampScore(input.impactedTest.riskLevel === "High" ? 88 : input.impactedTest.riskLevel === "Medium" ? 82 : 76);
+  const repositoryStyleMatch = clampScore(input.learningProfile?.repositoryMatchScore ?? ((input.repositoryAnalysis?.confidenceScore ?? 72) + (hasOldCode ? 10 : 0)));
+  const locatorQuality = clampScore(input.learningProfile?.locatorConfidence ?? (input.context.locatorStrategy === "XPath" ? 58 : input.context.locatorStrategy === "CSS selectors" ? 72 : 92));
+  const assertionQuality = clampScore(input.learningProfile?.assertionConfidence ?? (input.context.assertionStyle === "Navigation assertions" ? 72 : 90));
+  const businessCoverage = clampScore(input.learningProfile?.businessFlowConfidence ?? (input.impactedTest.riskLevel === "High" ? 88 : input.impactedTest.riskLevel === "Medium" ? 82 : 76));
   const maintainabilityScore = clampScore(74 + (input.context.usesPageObjectModel ? 12 : 0) + (input.context.usesFixtures ? 6 : 0) + (hasOldCode ? 4 : 0));
   const estimatedExecutionStability = clampScore((locatorQuality + assertionQuality + maintainabilityScore) / 3);
   const recommendations = [
@@ -176,8 +179,9 @@ function generatedCode(input: {
   impactedTest: RepositoryImpactAnalysisTest;
   impactAnalysis: RepositoryImpactAnalysis;
   repositoryAnalysis?: RepositoryAnalysis;
+  learningProfile?: RepositoryLearningProfile | null;
 }) {
-  const context = buildRepositoryContextSummary(input.oldCode, input.repositoryAnalysis);
+  const context = buildRepositoryContextSummary(input.oldCode, input.repositoryAnalysis, input.learningProfile);
   const moduleName = moduleNameFromPath(input.impactedTest.relatedChangedFile);
   const route = extractExistingGoto(input.oldCode) ?? `'${routeFromChangedFile(input.impactedTest.relatedChangedFile)}'`;
   const locatorComment = context.locatorStrategy === "getByTestId"
@@ -258,6 +262,7 @@ export async function generateRepositoryTestUpdates(input: {
   impactAnalysis: RepositoryImpactAnalysis;
   automationConfig: GitHubAutomationConfig;
   repositoryAnalysis?: RepositoryAnalysis;
+  learningProfile?: RepositoryLearningProfile | null;
   aiProvider: string;
   aiModel: string;
   createdBy?: string;
@@ -266,11 +271,12 @@ export async function generateRepositoryTestUpdates(input: {
   const updates: Omit<RepositoryGeneratedTestUpdate, "id" | "createdAt" | "updatedAt">[] = [];
   for (const impactedTest of targets) {
     const oldCode = await readRepositoryFile(input.automationConfig, impactedTest.testFilePath);
-    const repositoryContextSummary = buildRepositoryContextSummary(oldCode, input.repositoryAnalysis);
+    const repositoryContextSummary = buildRepositoryContextSummary(oldCode, input.repositoryAnalysis, input.learningProfile);
     const qualityReport = buildQualityReport({
       oldCode,
       impactedTest,
       repositoryAnalysis: input.repositoryAnalysis,
+      learningProfile: input.learningProfile,
       context: repositoryContextSummary,
     });
     const overallConfidence = clampScore((
@@ -291,6 +297,7 @@ export async function generateRepositoryTestUpdates(input: {
         impactedTest,
         impactAnalysis: input.impactAnalysis,
         repositoryAnalysis: input.repositoryAnalysis,
+        learningProfile: input.learningProfile,
       }),
       updateSummary: `${impactedTest.suggestedAction} for ${impactedTest.relatedChangedFile}`,
       impactReason: impactedTest.impactReason,
@@ -308,6 +315,14 @@ export async function generateRepositoryTestUpdates(input: {
       estimatedStabilityScore: qualityReport.estimatedExecutionStability,
       repositoryContextSummary,
       qualityReport,
+      repositoryLearningUsed: input.learningProfile ? {
+        locatorStrategy: input.learningProfile.locatorPreferences[0]?.strategy ?? repositoryContextSummary.locatorStrategy ?? "getByRole",
+        pageObjectModel: Boolean(repositoryContextSummary.usesPageObjectModel),
+        testStyle: input.learningProfile.testStylePatterns.describeStructure,
+        namingPattern: input.learningProfile.namingPatterns.testFilePattern,
+        repositoryMatchScore: input.learningProfile.repositoryMatchScore,
+        overallConfidence: input.learningProfile.overallConfidence,
+      } : undefined,
       createdBy: input.createdBy,
     });
   }
@@ -581,7 +596,7 @@ export async function validateRepositoryTestUpdatesWithGitHubActions(input: {
     failed,
     skipped,
     duration: Date.now() - started,
-    browser: "GitHub Actions",
+    browser: validationBrowser,
     environment: "github-actions",
     validationMode,
     command: `workflow_dispatch ${PLAYWRIGHT_VALIDATION_WORKFLOW} on ${branchName} (${validationMode}, ${validationBrowser})`,
@@ -1486,7 +1501,7 @@ async function walkFiles(root: string): Promise<string[]> {
 
 async function waitForWorkflowRun(config: GitHubAutomationConfig, branchName: string) {
   for (let attempt = 0; attempt < 30; attempt += 1) {
-    await delay(3000);
+    await delay(1500);
     const runs = await listWorkflowRuns(config, {
       workflowId: "playwright-validation.yml",
       branch: branchName,
@@ -1501,7 +1516,7 @@ async function waitForWorkflowCompletion(config: GitHubAutomationConfig, runId: 
   for (let attempt = 0; attempt < 120; attempt += 1) {
     const run = await getWorkflowRun(config, runId);
     if (run.status === "completed") return run;
-    await delay(5000);
+    await delay(3000);
   }
   throw new Error("GitHub Actions validation did not finish before the timeout.");
 }

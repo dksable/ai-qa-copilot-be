@@ -614,6 +614,14 @@ export interface RepositoryGeneratedTestUpdate {
     potentialRisks: string[];
     recommendations: string[];
   };
+  repositoryLearningUsed?: {
+    locatorStrategy: string;
+    pageObjectModel: boolean;
+    testStyle: string;
+    namingPattern: string;
+    repositoryMatchScore: number;
+    overallConfidence: number;
+  };
   createdBy?: string;
   createdAt: string;
   updatedAt: string;
@@ -848,6 +856,95 @@ export interface RepositoryAnalysis {
   createdBy: string;
   createdAt: string;
   updatedAt: string;
+}
+
+export interface RepositoryLearningProfile {
+  id: string;
+  workspaceId: string;
+  projectId?: string;
+  repositoryId: string;
+  repositoryName: string;
+  branch?: string;
+  framework: string;
+  frameworkVersion?: string;
+  language: string;
+  packageManager: string;
+  testDirectories: string[];
+  pageObjectDirectories: string[];
+  fixtureDirectories: string[];
+  helperDirectories: string[];
+  locatorPreferences: Array<{ strategy: string; weight: number; source: string }>;
+  namingPatterns: {
+    testFilePattern: string;
+    describePattern: string;
+    testCasePattern: string;
+    pageObjectPattern: string;
+    fixturePattern: string;
+    helperPattern: string;
+    folderPattern: string;
+  };
+  testStylePatterns: {
+    importStyle: string;
+    describeStructure: string;
+    beforeEachPattern: string;
+    fixtureUsage: string;
+    pageObjectUsage: string;
+    assertionStyle: string;
+    navigationStyle: string;
+    dataSetupStyle: string;
+    cleanupStyle: string;
+    commentsStyle: string;
+  };
+  authPatterns: string[];
+  commonFlows: string[];
+  acceptedGenerationCount: number;
+  rejectedGenerationCount: number;
+  editedGenerationCount: number;
+  validationPassCount: number;
+  validationFailCount: number;
+  repositoryMatchScore: number;
+  locatorConfidence: number;
+  assertionConfidence: number;
+  namingConfidence: number;
+  businessFlowConfidence: number;
+  validationConfidence: number;
+  overallConfidence: number;
+  aiConfidenceTrend: Array<{ date: string; score: number; event: string }>;
+  lastAnalyzedCommit?: string;
+  lastAnalyzedAt?: string;
+  createdAt: string;
+  updatedAt: string;
+}
+
+export interface AIQualityMetric {
+  id: string;
+  workspaceId: string;
+  projectId?: string;
+  repositoryId?: string;
+  generatedOutputId: string;
+  requirementId?: string;
+  validationRunId?: string;
+  aiProvider: string;
+  aiModel: string;
+  requirementCoverage: number;
+  repositoryMatchScore: number;
+  testGenerationAccuracy: number;
+  validationSuccessRate: number;
+  manualEditRate: number;
+  manualEditScore: number;
+  userAcceptanceRate: number;
+  aiConfidenceScore: number;
+  overallQualityScore: number;
+  qualityLabel: "Enterprise Ready" | "Excellent" | "Good" | "Needs Improvement" | "Low Quality";
+  generatedLines: number;
+  editedLines: number;
+  accepted: boolean;
+  rejected: boolean;
+  regenerated: boolean;
+  validationPassed: boolean;
+  validationFailed: boolean;
+  createdBy?: string;
+  createdAt: string;
 }
 
 export interface RepositoryChangedFile {
@@ -1131,6 +1228,8 @@ export interface ProjectDatabase {
   releaseReadinessSnapshots: ReleaseReadinessSnapshot[];
   repositoryUpdatePullRequests: RepositoryUpdatePullRequest[];
   repositoryAnalyses: RepositoryAnalysis[];
+  repositoryLearningProfiles: RepositoryLearningProfile[];
+  aiQualityMetrics: AIQualityMetric[];
   repositorySyncs: RepositorySync[];
   playwrightValidations: PlaywrightValidationJob[];
   extensionReports: ExtensionReport[];
